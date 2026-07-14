@@ -33,12 +33,14 @@ class ContextManager:
         """Set a value in context."""
         old = self._store.get(key)
         self._store[key] = value
-        self._history.append({
-            "key": key,
-            "old": old,
-            "new": value,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        })
+        self._history.append(
+            {
+                "key": key,
+                "old": old,
+                "new": value,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        )
         logger.debug(f"Context set: {key} = {value}")
 
     def delete(self, key: str) -> None:
@@ -55,6 +57,11 @@ class ContextManager:
     def snapshot(self) -> dict[str, Any]:
         """Get a snapshot of the entire context."""
         return dict(self._store)
+
+    def restore(self, snapshot: dict[str, Any]) -> None:
+        """Replace context state from a persistence snapshot."""
+        self._store = dict(snapshot)
+        self._history.clear()
 
     def story_context(self, story_id: str) -> dict[str, Any]:
         """Get all context entries for a specific story."""

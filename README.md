@@ -128,6 +128,21 @@ print(f"Tasks: {result['story']['tasks_completed']}/{result['story']['tasks_tota
 print(f"TDD Steps: {result['story']['tdd_steps_completed']}/{result['story']['tdd_steps_total']}")
 ```
 
+### Run several stories
+
+Use `run_multiple_pipelines()` for sequential work. Use `run_multiple_pipelines_async()` to run independent stories concurrently. Each story gets its own engine and agent team.
+
+```python
+import asyncio
+
+from rubric.orchestrator import StoryRequest, run_multiple_pipelines_async
+
+results = asyncio.run(run_multiple_pipelines_async([
+    StoryRequest("Product search", "Find products", ["Shows matching products"]),
+    StoryRequest("Checkout", "Pay for products", ["Accepts payment"]),
+]))
+```
+
 ### Run the example script
 
 ```bash
@@ -142,7 +157,7 @@ uv run python examples/basic_story.py
 uv run pytest tests/ -v
 ```
 
-All 38 tests should pass with zero warnings.
+All 60 tests should pass with zero warnings.
 
 ---
 
@@ -166,6 +181,8 @@ rubric/
 │       │   ├── workflow.py     # State machine engine
 │       │   ├── scheduler.py    # Task assignment + load balancing
 │       │   └── transitions.py  # Quality gates at stage boundaries
+│       ├── llm/                # Provider-neutral LLM configuration and clients
+│       ├── persistence/        # JSON workflow state storage
 │       ├── agents/
 │       │   ├── base.py         # Abstract base agent
 │       │   ├── product_owner.py
@@ -180,7 +197,11 @@ rubric/
 ├── examples/
 │   └── basic_story.py          # Two runnable examples
 └── tests/
-    └── test_rubric.py           # 38 tests
+    ├── test_models.py
+    ├── test_engine.py
+    ├── test_agents.py
+    ├── test_orchestrator.py
+    └── test_cli.py
 ```
 
 ---
@@ -192,7 +213,9 @@ rubric run <title> \
   --description <text> \
   --criteria <text> \
   --output json|text \
-  --verbose
+  --verbose \
+  --state-file <path> \
+  --event-log <path>
 ```
 
 | Flag | Short | Description |
@@ -202,6 +225,8 @@ rubric run <title> \
 | `--criteria` | `-c` | Acceptance criteria (repeatable) |
 | `--output` | `-o` | Output format: `json` or `text` (default: text) |
 | `--verbose` | `-v` | Enable detailed logging |
+| `--state-file` | | Save and restore workflow state in this JSON file |
+| `--event-log` | | Append workflow events to this JSON-lines file |
 
 Example with JSON output:
 
@@ -242,8 +267,18 @@ story = engine.create_story("My Feature", "Description")
 
 ---
 
-## Connecting to Real LLMs
+## Using real LLMs
 
-This engine currently uses template-based agents that produce deterministic artifacts. To connect to real LLMs (OpenAI, Anthropic, local models, etc.), see `config/llm_config.json` for an example configuration structure.
+Agents load the provider and model for their role from `config/llm_config.json`. They use deterministic template artifacts by default.
 
-Each agent's `execute()` method can be modified to call an LLM using the configured provider and model settings.
+To enable live provider calls, set `global.enabled` to `true` in the configuration or set `RUBRIC_ENABLE_LLM=1`. Set the provider API key environment variable named in the configuration before you run the pipeline.
+
+Set `APP_ENV` or `ENV` to select an environment. Rubric first looks for `llm_config.<environment>.json`. It then applies any matching `environments` override in the base configuration. The included development configuration uses Ollama. Production keeps the configured cloud providers.
+
+Rubric supports OpenAI-compatible APIs, Anthropic and Google providers. You can also inject an `LLMProvider` when you create an agent for custom integrations.
+
+## Save workflow state and events
+
+Use `--state-file` to save the workflow after every transition and completed task. Start another engine with the same path to restore its stories, artifacts and context. Register a live agent team after restoring the engine.
+
+Use `--event-log` to write one JSON event per line for monitoring or audit tools.

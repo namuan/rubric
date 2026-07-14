@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from rubric.agents import (
@@ -22,6 +24,15 @@ from rubric.models.story import Story, StoryState, Task, TaskPriority
 logger = logging.getLogger(__name__)
 
 TaskExecutor = Callable[[Any, Task, Story], list[Artifact]]
+
+
+@dataclass(frozen=True)
+class StoryRequest:
+    """Input for one independent delivery pipeline."""
+
+    title: str
+    description: str
+    acceptance_criteria: list[str] | None = None
 
 
 def create_default_team() -> list[Any]:
@@ -157,8 +168,7 @@ def _pipeline_result(engine: WorkflowEngine, story: Story) -> dict[str, Any]:
     return {
         "story": engine.story_summary(story.id),
         "artifacts": [
-            artifact.summary()
-            for artifact in engine.get_artifacts_for_story(story.id)
+            artifact.summary() for artifact in engine.get_artifacts_for_story(story.id)
         ],
         "engine_status": engine.status(),
     }
@@ -168,6 +178,8 @@ def run_full_pipeline(
     title: str,
     description: str,
     acceptance_criteria: list[str] | None = None,
+    persistence_path: str | None = None,
+    event_log_path: str | None = None,
 ) -> dict[str, Any]:
     """Run a story from inception through delivery.
 
@@ -176,7 +188,10 @@ def run_full_pipeline(
     unexpected exception leaves the story in a visible blocked state rather
     than reporting unperformed work as complete.
     """
-    engine = WorkflowEngine()
+    engine = WorkflowEngine(
+        persistence_path=persistence_path,
+        event_log_path=event_log_path,
+    )
     story: Story | None = None
 
     try:
@@ -342,9 +357,66 @@ def run_full_pipeline(
     except Exception as error:
         logger.exception("Pipeline failed; preserving the last known story state")
         if story is not None:
-            engine.block_story(story.id, f"Pipeline error: {type(error).__name__}: {error}")
+            engine.block_story(
+                story.id, f"Pipeline error: {type(error).__name__}: {error}"
+            )
 
     if story is None:
         # This is only reachable if story creation itself fails.
         return {"story": None, "artifacts": [], "engine_status": engine.status()}
     return _pipeline_result(engine, story)
+
+
+def run_multiple_pipelines(stories: list[StoryRequest]) -> list[dict[str, Any]]:
+    """Run independent stories sequentially through isolated pipelines."""
+    return [
+        run_full_pipeline(
+            title=story.title,
+            description=story.description,
+            acceptance_criteria=story.acceptance_criteria,
+        )
+        for story in stories
+    ]
+
+
+async def run_full_pipeline_async(
+    title: str,
+    description: str,
+    acceptance_criteria: list[str] | None = None,
+    persistence_path: str | None = None,
+    event_log_path: str | None = None,
+) -> dict[str, Any]:
+    """Run one pipeline without blocking an asyncio event loop.
+
+    Each call owns its workflow engine and agent team, so concurrent calls do
+    not share mutable registries or persistence state.
+    """
+    return await asyncio.to_thread(
+        run_full_pipeline,
+        title=title,
+        description=description,
+        acceptance_criteria=acceptance_criteria,
+        persistence_path=persistence_path,
+        event_log_path=event_log_path,
+    )
+
+
+async def run_multiple_pipelines_async(
+    stories: list[StoryRequest],
+    max_concurrency: int = 4,
+) -> list[dict[str, Any]]:
+    """Run independent story pipelines concurrently with bounded parallelism."""
+    if max_concurrency < 1:
+        raise ValueError("max_concurrency must be at least 1")
+
+    semaphore = asyncio.Semaphore(max_concurrency)
+
+    async def run_story_request(story: StoryRequest) -> dict[str, Any]:
+        async with semaphore:
+            return await run_full_pipeline_async(
+                story.title,
+                story.description,
+                story.acceptance_criteria,
+            )
+
+    return await asyncio.gather(*(run_story_request(story) for story in stories))

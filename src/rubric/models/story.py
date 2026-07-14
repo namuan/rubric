@@ -29,11 +29,31 @@ class StoryState(str, Enum):
 VALID_TRANSITIONS: dict[StoryState, list[StoryState]] = {
     StoryState.INCEPTION: [StoryState.PLANNING, StoryState.BLOCKED],
     StoryState.PLANNING: [StoryState.DESIGN, StoryState.INCEPTION, StoryState.BLOCKED],
-    StoryState.DESIGN: [StoryState.IMPLEMENTATION, StoryState.PLANNING, StoryState.BLOCKED],
-    StoryState.IMPLEMENTATION: [StoryState.REVIEW, StoryState.DESIGN, StoryState.BLOCKED],
-    StoryState.REVIEW: [StoryState.ACCEPTANCE, StoryState.IMPLEMENTATION, StoryState.BLOCKED],
-    StoryState.ACCEPTANCE: [StoryState.INTEGRATION, StoryState.IMPLEMENTATION, StoryState.BLOCKED],
-    StoryState.INTEGRATION: [StoryState.DELIVERY, StoryState.ACCEPTANCE, StoryState.BLOCKED],
+    StoryState.DESIGN: [
+        StoryState.IMPLEMENTATION,
+        StoryState.PLANNING,
+        StoryState.BLOCKED,
+    ],
+    StoryState.IMPLEMENTATION: [
+        StoryState.REVIEW,
+        StoryState.DESIGN,
+        StoryState.BLOCKED,
+    ],
+    StoryState.REVIEW: [
+        StoryState.ACCEPTANCE,
+        StoryState.IMPLEMENTATION,
+        StoryState.BLOCKED,
+    ],
+    StoryState.ACCEPTANCE: [
+        StoryState.INTEGRATION,
+        StoryState.IMPLEMENTATION,
+        StoryState.BLOCKED,
+    ],
+    StoryState.INTEGRATION: [
+        StoryState.DELIVERY,
+        StoryState.ACCEPTANCE,
+        StoryState.BLOCKED,
+    ],
     StoryState.DELIVERY: [StoryState.DONE, StoryState.INTEGRATION, StoryState.BLOCKED],
     StoryState.BLOCKED: [
         StoryState.INCEPTION,
@@ -66,8 +86,8 @@ class TaskStatus(str, Enum):
 class TaskStepType(str, Enum):
     """TDD substep: Red → Green → Refactor."""
 
-    RED = "red"        # Write a failing test
-    GREEN = "green"    # Write minimum code to pass
+    RED = "red"  # Write a failing test
+    GREEN = "green"  # Write minimum code to pass
     REFACTOR = "refactor"  # Clean up, keep tests green
 
 
@@ -151,14 +171,6 @@ class Task(BaseModel):
                 return step
         return None
 
-    def next_step(self) -> TaskStep | None:
-        """Get and advance to the next pending step."""
-        step = self.current_step
-        if step:
-            step.status = TaskStepStatus.IN_PROGRESS
-            step.updated_at = datetime.now(timezone.utc)
-        return step
-
     def assign(self, agent_id: str) -> None:
         self.assigned_agent = agent_id
         self.status = TaskStatus.IN_PROGRESS
@@ -176,7 +188,11 @@ class Task(BaseModel):
         self.updated_at = datetime.now(timezone.utc)
 
     def all_steps_done(self) -> bool:
-        return all(s.status == TaskStepStatus.DONE for s in self.steps) if self.steps else True
+        return (
+            all(s.status == TaskStepStatus.DONE for s in self.steps)
+            if self.steps
+            else True
+        )
 
 
 class Story(BaseModel):
@@ -204,12 +220,14 @@ class Story(BaseModel):
         old_state = self.state
         self.state = new_state
         self.updated_at = datetime.now(timezone.utc)
-        self.history.append({
-            "from": old_state.value,
-            "to": new_state.value,
-            "reason": reason,
-            "timestamp": self.updated_at.isoformat(),
-        })
+        self.history.append(
+            {
+                "from": old_state.value,
+                "to": new_state.value,
+                "reason": reason,
+                "timestamp": self.updated_at.isoformat(),
+            }
+        )
 
     @property
     def completed_tasks(self) -> int:
@@ -225,7 +243,9 @@ class Story(BaseModel):
         total_steps = sum(t.total_steps for t in self.tasks)
         if total_steps == 0:
             # Fall back to task-level counting
-            return 1.0 if self.tasks and self.completed_tasks == self.total_tasks else 0.0
+            return (
+                1.0 if self.tasks and self.completed_tasks == self.total_tasks else 0.0
+            )
         done_steps = sum(t.completed_steps for t in self.tasks)
         return done_steps / total_steps
 

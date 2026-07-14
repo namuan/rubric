@@ -27,6 +27,11 @@ class ReviewerAgent(BaseAgent):
         )
 
     def execute(self, task: Task, story: Story) -> list[Artifact]:
+        self.prepare_execution(
+            task,
+            story,
+            "Review the implementation for correctness, clarity, and risk.",
+        )
         artifacts = []
 
         # Produce review feedback

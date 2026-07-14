@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import logging
+import os
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable
 
-from rubric.models.story import (
-    Story, StoryState, Task, TaskStep, TaskStepType, TaskStepStatus, TaskStatus,
-)
-from rubric.models.agent import Agent, Role, STAGE_RESPONSIBILITIES
-from rubric.models.artifacts import Artifact, ArtifactType
+from rubric.models.story import Story, StoryState, Task, TaskStatus, TaskStepStatus
+from rubric.models.agent import Agent, Role
+from rubric.models.artifacts import Artifact
 from rubric.engine.scheduler import TaskScheduler
 from rubric.engine.transitions import validate_transition
+from rubric.engine.event_logger import EventLogger
 from rubric.context.manager import ContextManager
+from rubric.persistence import JsonWorkflowStore, WorkflowSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +23,9 @@ logger = logging.getLogger(__name__)
 class WorkflowEvent:
     """An event emitted during workflow execution."""
 
-    def __init__(self, event_type: str, story_id: str, data: dict[str, Any] | None = None):
+    def __init__(
+        self, event_type: str, story_id: str, data: dict[str, Any] | None = None
+    ):
         self.event_type = event_type
         self.story_id = story_id
         self.data = data or {}
@@ -44,7 +49,12 @@ class WorkflowEngine:
     6. Handles blockers and backtracking
     """
 
-    def __init__(self, max_execution_attempts: int = 3) -> None:
+    def __init__(
+        self,
+        max_execution_attempts: int = 3,
+        persistence_path: str | Path | None = None,
+        event_log_path: str | Path | None = None,
+    ) -> None:
         if max_execution_attempts < 1:
             raise ValueError("max_execution_attempts must be at least 1")
         self.scheduler = TaskScheduler()
@@ -55,6 +65,13 @@ class WorkflowEngine:
         self.event_handlers: list[EventHandler] = []
         self._log: list[WorkflowEvent] = []
         self.max_execution_attempts = max_execution_attempts
+        state_path = persistence_path or os.getenv("RUBRIC_STATE_FILE")
+        self.persistence = JsonWorkflowStore(state_path) if state_path else None
+        self._restore_state()
+
+        log_path = event_log_path or os.getenv("RUBRIC_EVENT_LOG")
+        if log_path:
+            self.on_event(EventLogger(log_path))
 
     # ── Agent Management ──────────────────────────────────────────────
 
@@ -73,6 +90,7 @@ class WorkflowEngine:
         self.context.set(f"story:{story.id}:state", story.state.value)
         self._emit("story_created", story.id, {"title": title})
         logger.info(f"Created story: {story.id} — {title}")
+        self._autosave()
         return story
 
     def get_story(self, story_id: str) -> Story:
@@ -85,7 +103,9 @@ class WorkflowEngine:
     def add_artifact(self, artifact: Artifact) -> None:
         """Register an artifact once and associate it with its story."""
         if artifact.id in self.artifacts:
-            logger.debug("Artifact %s is already registered; skipping duplicate", artifact.id)
+            logger.debug(
+                "Artifact %s is already registered; skipping duplicate", artifact.id
+            )
             return
 
         self.artifacts[artifact.id] = artifact
@@ -109,7 +129,9 @@ class WorkflowEngine:
     def on_event(self, handler: EventHandler) -> None:
         self.event_handlers.append(handler)
 
-    def _emit(self, event_type: str, story_id: str, data: dict[str, Any] | None = None) -> None:
+    def _emit(
+        self, event_type: str, story_id: str, data: dict[str, Any] | None = None
+    ) -> None:
         event = WorkflowEvent(event_type, story_id, data)
         self._log.append(event)
         for handler in self.event_handlers:
@@ -121,7 +143,9 @@ class WorkflowEngine:
 
     # ── Stage Transitions ─────────────────────────────────────────────
 
-    def transition_story(self, story_id: str, new_state: StoryState, reason: str = "") -> bool:
+    def transition_story(
+        self, story_id: str, new_state: StoryState, reason: str = ""
+    ) -> bool:
         """Transition a story, enforcing gates and safely containing failures.
 
         Gate failures and invalid transitions leave the story in ``BLOCKED``
@@ -146,11 +170,15 @@ class WorkflowEngine:
                     + "; ".join(failures)
                 )
                 logger.warning("Story %s: %s", story_id, failure_reason)
-                self._emit("transition_gate_failed", story_id, {
-                    "from": old_state.value,
-                    "to": new_state.value,
-                    "failures": failures,
-                })
+                self._emit(
+                    "transition_gate_failed",
+                    story_id,
+                    {
+                        "from": old_state.value,
+                        "to": new_state.value,
+                        "failures": failures,
+                    },
+                )
                 self._block_story(story, failure_reason)
                 return False
 
@@ -159,22 +187,31 @@ class WorkflowEngine:
         except ValueError as error:
             failure_reason = f"Transition failed: {error}"
             logger.exception("Story %s: %s", story_id, failure_reason)
-            self._emit("transition_failed", story_id, {
-                "from": old_state.value,
-                "to": new_state.value,
-                "reason": failure_reason,
-            })
+            self._emit(
+                "transition_failed",
+                story_id,
+                {
+                    "from": old_state.value,
+                    "to": new_state.value,
+                    "reason": failure_reason,
+                },
+            )
             if new_state != StoryState.BLOCKED:
                 self._block_story(story, failure_reason)
             return False
 
         self.context.set(f"story:{story_id}:state", new_state.value)
-        self._emit("story_transition", story_id, {
-            "from": old_state.value,
-            "to": new_state.value,
-            "reason": reason,
-        })
+        self._emit(
+            "story_transition",
+            story_id,
+            {
+                "from": old_state.value,
+                "to": new_state.value,
+                "reason": reason,
+            },
+        )
         logger.info(f"Story {story_id}: {old_state.value} -> {new_state.value}")
+        self._autosave()
         return True
 
     def block_story(self, story_id: str, reason: str) -> bool:
@@ -204,46 +241,21 @@ class WorkflowEngine:
             return False
 
         self.context.set(f"story:{story.id}:state", StoryState.BLOCKED.value)
-        self._emit("story_transition", story.id, {
-            "from": old_state.value,
-            "to": StoryState.BLOCKED.value,
-            "reason": reason,
-        })
+        self._emit(
+            "story_transition",
+            story.id,
+            {
+                "from": old_state.value,
+                "to": StoryState.BLOCKED.value,
+                "reason": reason,
+            },
+        )
         self._emit("story_blocked", story.id, {"reason": reason})
         logger.error("Story %s blocked: %s", story.id, reason)
+        self._autosave()
         return True
 
     # ── Task + TDD Step Execution ─────────────────────────────────────
-
-    def assign_tasks_for_stage(self, story_id: str) -> list[tuple[Task, Agent]]:
-        """Find ready tasks for a story and assign them to available agents."""
-        story = self.get_story(story_id)
-        ready = story.ready_tasks()
-        assignments = []
-
-        for task in ready:
-            agent = self.scheduler.find_best_agent(
-                task=task,
-                agents=list(self.agents.values()),
-                stage=story.state.value,
-            )
-            if agent:
-                self.scheduler.assign_task(task, agent)
-                assignments.append((task, agent))
-                self._emit("task_assigned", story_id, {
-                    "task_id": task.id,
-                    "agent_id": agent.id,
-                    "agent_name": agent.name,
-                })
-                logger.info(f"Assigned task '{task.title}' to {agent.name}")
-            else:
-                self.block_task(
-                    story_id,
-                    task.id,
-                    "No available agent could be assigned to the task",
-                )
-
-        return assignments
 
     def execute_agent_task(
         self,
@@ -254,9 +266,12 @@ class WorkflowEngine:
     ) -> list[Artifact] | None:
         """Execute a non-TDD task with retries and block it on exhaustion."""
         story, task = self._get_story_task(story_id, task_id)
-        execute = executor or (lambda handler, current_task, current_story: handler.execute(
-            current_task, current_story,
-        ))
+        execute = executor or (
+            lambda handler, current_task, current_story: handler.execute(
+                current_task,
+                current_story,
+            )
+        )
         return self._execute_with_retries(
             story,
             task,
@@ -269,7 +284,8 @@ class WorkflowEngine:
         """Execute a task through its TDD substeps using the provided agent handler.
 
         This drives the Red→Green→Refactor cycle for a single task.
-        The agent_handler is a BaseAgent subclass that implements execute_step().
+        The agent handler executes each step through its standard ``execute``
+        interface.
 
         Returns all artifacts produced during the cycle.
         """
@@ -291,23 +307,38 @@ class WorkflowEngine:
                 continue
 
             step.status = TaskStepStatus.IN_PROGRESS
-            step.updated_at = __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
+            step.updated_at = datetime.now(timezone.utc)
 
-            self._emit("step_started", story.id, {
-                "task_id": task.id,
-                "step_id": step.id,
-                "step_type": step.step_type.value,
-                "step_title": step.title,
-            })
+            self._emit(
+                "step_started",
+                story.id,
+                {
+                    "task_id": task.id,
+                    "step_id": step.id,
+                    "step_type": step.step_type.value,
+                    "step_title": step.title,
+                },
+            )
 
-            artifact = agent_handler.execute_step(step, task, story)
+            artifacts = agent_handler.execute(task, story, step=step)
+            if len(artifacts) != 1:
+                raise RuntimeError(
+                    f"Developer returned {len(artifacts)} artifacts for TDD step {step.id}"
+                )
+            artifact = artifacts[0]
+            # Preserve successful steps if a later step fails and is retried.
+            self.add_artifact(artifact)
             all_artifacts.append(artifact)
 
-            self._emit("step_completed", story.id, {
-                "task_id": task.id,
-                "step_id": step.id,
-                "step_type": step.step_type.value,
-            })
+            self._emit(
+                "step_completed",
+                story.id,
+                {
+                    "task_id": task.id,
+                    "step_id": step.id,
+                    "step_type": step.step_type.value,
+                },
+            )
             logger.info(f"  [{step.step_type.value:9s}] {step.title}")
 
         return all_artifacts
@@ -338,12 +369,16 @@ class WorkflowEngine:
                     attempt,
                     self.max_execution_attempts,
                 )
-                self._emit("task_execution_failed", story.id, {
-                    "task_id": task.id,
-                    "attempt": attempt,
-                    "max_attempts": self.max_execution_attempts,
-                    "error": str(error),
-                })
+                self._emit(
+                    "task_execution_failed",
+                    story.id,
+                    {
+                        "task_id": task.id,
+                        "attempt": attempt,
+                        "max_attempts": self.max_execution_attempts,
+                        "error": str(error),
+                    },
+                )
 
         reason = (
             f"Execution failed after {self.max_execution_attempts} attempts: "
@@ -364,7 +399,9 @@ class WorkflowEngine:
         if task.status == TaskStatus.BLOCKED:
             raise RuntimeError(f"Cannot complete blocked task {task_id}")
         if not task.all_steps_done():
-            raise ValueError(f"Cannot complete task {task_id} with unfinished TDD steps")
+            raise ValueError(
+                f"Cannot complete task {task_id} with unfinished TDD steps"
+            )
 
         task.complete()
 
@@ -372,11 +409,16 @@ class WorkflowEngine:
             agent = self.agents[task.assigned_agent]
             agent.finish_task(task_id)
 
-        self._emit("task_completed", story_id, {
-            "task_id": task_id,
-            "progress": story.progress,
-        })
+        self._emit(
+            "task_completed",
+            story_id,
+            {
+                "task_id": task_id,
+                "progress": story.progress,
+            },
+        )
         logger.info(f"Task completed: {task.title} (progress: {story.progress:.0%})")
+        self._autosave()
         return task
 
     def block_task(self, story_id: str, task_id: str, reason: str) -> Task:
@@ -389,66 +431,56 @@ class WorkflowEngine:
         if task.assigned_agent and task.assigned_agent in self.agents:
             self.agents[task.assigned_agent].finish_task(task_id)
         task.block(reason)
-        self._emit("task_blocked", story_id, {
-            "task_id": task.id,
-            "reason": reason,
-        })
+        self._emit(
+            "task_blocked",
+            story_id,
+            {
+                "task_id": task.id,
+                "reason": reason,
+            },
+        )
         logger.warning("Task blocked: %s — %s", task.title, reason)
+        self._autosave()
         return task
 
-    def check_stage_complete(self, story_id: str) -> bool:
-        story = self.get_story(story_id)
-        if not story.tasks:
-            return True
-        return all(t.status == TaskStatus.DONE for t in story.tasks)
+    # ── Persistence ──────────────────────────────────────────────────
 
-    def advance_story(self, story_id: str, reason: str = "") -> StoryState | None:
-        story = self.get_story(story_id)
-        if not self.check_stage_complete(story_id):
-            return None
+    def _restore_state(self) -> None:
+        if self.persistence is None:
+            return
+        try:
+            snapshot = self.persistence.load()
+        except (OSError, ValueError):
+            logger.exception(
+                "Could not restore workflow state from %s", self.persistence.path
+            )
+            return
+        if snapshot is None:
+            return
 
-        from rubric.models.story import VALID_TRANSITIONS
-        possible = VALID_TRANSITIONS.get(story.state, [])
-        forward = [s for s in possible if s != StoryState.BLOCKED]
-        stage_order = [
-            StoryState.INCEPTION, StoryState.PLANNING, StoryState.DESIGN,
-            StoryState.IMPLEMENTATION, StoryState.REVIEW, StoryState.ACCEPTANCE,
-            StoryState.INTEGRATION, StoryState.DELIVERY, StoryState.DONE,
-        ]
-        current_idx = stage_order.index(story.state) if story.state in stage_order else -1
-        next_states = [s for s in forward if stage_order.index(s) > current_idx] if current_idx >= 0 else forward
+        self.stories = snapshot.stories
+        self.artifacts = snapshot.artifacts
+        self.context.restore(snapshot.context)
+        logger.info(
+            "Restored %d stories from %s", len(self.stories), self.persistence.path
+        )
 
-        if next_states:
-            next_state = next_states[0]
-            self.transition_story(story_id, next_state, reason or f"Stage {story.state.value} complete")
-            return next_state
-        return None
-
-    # ── Full Pipeline Run ─────────────────────────────────────────────
-
-    def run_story(self, story_id: str, max_iterations: int = 200) -> Story:
-        """Run a story through the full pipeline."""
-        story = self.get_story(story_id)
-        iterations = 0
-
-        while story.state != StoryState.DONE and story.state != StoryState.BLOCKED:
-            if iterations >= max_iterations:
-                logger.warning(f"Story {story_id} hit max iterations ({max_iterations})")
-                break
-
-            assignments = self.assign_tasks_for_stage(story_id)
-            for task, agent in assignments:
-                self.complete_task(story_id, task.id)
-
-            result = self.advance_story(story_id)
-            if result is None and not story.ready_tasks() and story.tasks:
-                logger.warning(f"Story {story_id} is stuck at {story.state.value}")
-                break
-
-            iterations += 1
-
-        logger.info(f"Story {story_id} finished at state: {story.state.value}")
-        return story
+    def _autosave(self) -> None:
+        if self.persistence is None:
+            return
+        snapshot = WorkflowSnapshot(
+            stories=self.stories,
+            artifacts=self.artifacts,
+            context=self.context.snapshot(),
+        )
+        try:
+            self.persistence.save(snapshot)
+        except Exception:
+            # Persistence is optional and must not turn completed work into a
+            # failed pipeline when an artifact cannot be serialized or saved.
+            logger.exception(
+                "Could not save workflow state to %s", self.persistence.path
+            )
 
     # ── Status / Reporting ────────────────────────────────────────────
 
@@ -483,5 +515,6 @@ class WorkflowEngine:
             "tdd_steps_total": total_steps,
             "tdd_steps_completed": done_steps,
             "artifacts": len(story.artifacts),
+            "transitions": len(story.history),
             "history": story.history,
         }

@@ -75,7 +75,9 @@ class ScrumMasterAgent(BaseAgent):
             required_role="developer",
             priority=TaskPriority.HIGH,
             stage=StoryState.IMPLEMENTATION.value,
-            steps=self._tdd_steps("Integration verification", "Verify all pieces work together"),
+            steps=self._tdd_steps(
+                "Integration verification", "Verify all pieces work together"
+            ),
         )
         if tasks:
             integration_task.dependencies = [tasks[-1].id]
@@ -161,6 +163,11 @@ class ScrumMasterAgent(BaseAgent):
 
     def execute(self, task: Task, story: Story) -> list[Artifact]:
         """Execute a planning task — produce task breakdown artifact."""
+        self.prepare_execution(
+            task,
+            story,
+            "Create a small, dependency-aware plan with focused TDD work.",
+        )
         artifacts = []
 
         if "break" in task.title.lower() or "plan" in task.title.lower():
@@ -170,6 +177,15 @@ class ScrumMasterAgent(BaseAgent):
                     ArtifactType.TASK_BREAKDOWN,
                     f"Task Breakdown: {story.title}",
                     report,
+                    story,
+                    task,
+                )
+            )
+            artifacts.append(
+                self.produce_artifact(
+                    ArtifactType.SPRINT_PLAN,
+                    f"Sprint Plan: {story.title}",
+                    self._sprint_plan(story),
                     story,
                     task,
                 )
@@ -208,4 +224,13 @@ class ScrumMasterAgent(BaseAgent):
             },
             "artifacts_produced": len(story.artifacts),
             "blockers": [],
+        }
+
+    def _sprint_plan(self, story: Story) -> dict:
+        return {
+            "story_id": story.id,
+            "goal": story.title,
+            "ordered_task_ids": [task.id for task in story.tasks],
+            "definition_of_done": story.acceptance_criteria,
+            "estimated_tdd_steps": sum(task.total_steps for task in story.tasks),
         }

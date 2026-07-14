@@ -10,6 +10,7 @@ from rubric.models.story import (
 )
 from rubric.models.agent import Agent, Role, STAGE_RESPONSIBILITIES
 from rubric.models.artifacts import Artifact, ArtifactType
+from rubric.models.protocols import ArtifactRegistry
 
 __all__ = [
     "Story",
@@ -25,4 +26,5 @@ __all__ = [
     "STAGE_RESPONSIBILITIES",
     "Artifact",
     "ArtifactType",
+    "ArtifactRegistry",
 ]

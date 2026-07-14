@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from rubric.agents.base import BaseAgent
 from rubric.models.agent import Role
-from rubric.models.story import Task, Story, TaskPriority
+from rubric.models.story import Story, Task
 from rubric.models.artifacts import Artifact, ArtifactType
 
 
@@ -27,6 +27,11 @@ class ProductOwnerAgent(BaseAgent):
         )
 
     def execute(self, task: Task, story: Story) -> list[Artifact]:
+        self.prepare_execution(
+            task,
+            story,
+            "Define clear user value and verifiable acceptance criteria.",
+        )
         artifacts = []
 
         # Enrich story description if this is an inception task

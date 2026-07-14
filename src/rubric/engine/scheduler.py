@@ -5,8 +5,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from rubric.models.story import Task, TaskStatus
-from rubric.models.agent import Agent, Role, STAGE_RESPONSIBILITIES
+from rubric.models.story import Task
+from rubric.models.agent import Agent, STAGE_RESPONSIBILITIES
 
 logger = logging.getLogger(__name__)
 
@@ -37,11 +37,7 @@ class TaskScheduler:
                 required_role = stage_roles[0].value
 
         # Filter candidates
-        candidates = [
-            a
-            for a in agents
-            if a.available and a.can_handle(required_role)
-        ]
+        candidates = [a for a in agents if a.available and a.can_handle(required_role)]
 
         if not candidates:
             # Try without role filter — any available agent

@@ -5,12 +5,12 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import sys
 
 from rubric.orchestrator import run_full_pipeline
 
 
-def main(argv: list[str] | None = None) -> None:
+def build_parser() -> argparse.ArgumentParser:
+    """Build the command-line parser for reuse in tests and integrations."""
     parser = argparse.ArgumentParser(
         prog="rubric",
         description="Rubric — multi-agent workflow engine for large-scale application delivery",
@@ -38,8 +38,24 @@ def main(argv: list[str] | None = None) -> None:
     run_parser.add_argument(
         "--verbose", "-v", action="store_true", help="Enable verbose logging"
     )
+    run_parser.add_argument(
+        "--state-file",
+        help="Persist workflow state to this JSON file",
+    )
+    run_parser.add_argument(
+        "--event-log",
+        help="Append workflow events to this JSON-lines file",
+    )
+    return parser
 
-    args = parser.parse_args(argv)
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse Rubric CLI arguments."""
+    return build_parser().parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
 
     if args.command == "run":
         if args.verbose:
@@ -50,6 +66,8 @@ def main(argv: list[str] | None = None) -> None:
             title=args.title,
             description=args.description,
             acceptance_criteria=criteria,
+            persistence_path=args.state_file,
+            event_log_path=args.event_log,
         )
 
         if args.output == "json":
@@ -57,7 +75,7 @@ def main(argv: list[str] | None = None) -> None:
         else:
             _print_text(result)
     else:
-        parser.print_help()
+        build_parser().print_help()
 
 
 def _print_text(result: dict) -> None:
@@ -72,7 +90,9 @@ def _print_text(result: dict) -> None:
     print(f"  Final State:     {story['state']}")
     print(f"  Progress:        {story['progress']}")
     print(f"  Tasks:           {story['tasks_completed']}/{story['tasks_total']}")
-    print(f"  TDD Steps:       {story['tdd_steps_completed']}/{story['tdd_steps_total']}")
+    print(
+        f"  TDD Steps:       {story['tdd_steps_completed']}/{story['tdd_steps_total']}"
+    )
     print(f"  Artifacts:       {story['artifacts']}")
     print(f"  Transitions:     {story['transitions']}")
     print()

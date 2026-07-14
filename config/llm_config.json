@@ -22,7 +22,8 @@
       "default_model": "anthropic/claude-sonnet-4"
     },
     "ollama": {
-      "api_key_env": "",                "base_url": "http://localhost:11434/v1",
+      "api_key_env": "",
+      "base_url": "http://localhost:11434/v1",
       "default_model": "llama3.3-70b"
     },
     "vllm": {
@@ -84,7 +85,25 @@
     }
   },
 
+  "environments": {
+    "development": {
+      "agents": {
+        "product_owner": {"provider": "ollama", "model": "llama3.3-70b"},
+        "architect": {"provider": "ollama", "model": "llama3.3-70b"},
+        "developer": {"provider": "ollama", "model": "llama3.3-70b"},
+        "reviewer": {"provider": "ollama", "model": "llama3.3-70b"},
+        "test_writer": {"provider": "ollama", "model": "llama3.3-70b"},
+        "devops": {"provider": "ollama", "model": "llama3.3-70b"},
+        "scrum_master": {"provider": "ollama", "model": "llama3.3-70b"}
+      }
+    },
+    "production": {
+      "global": {"enabled": false}
+    }
+  },
+
   "global": {
+    "enabled": false,
     "temperature": 0.3,
     "max_tokens": 4096,
     "timeout_seconds": 120,

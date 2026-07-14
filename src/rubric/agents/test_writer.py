@@ -38,12 +38,21 @@ class TestWriterAgent(BaseAgent):
         )
 
     def execute(self, task: Task, story: Story) -> list[Artifact]:
+        self.prepare_execution(
+            task,
+            story,
+            "Define end-user acceptance scenarios and test evidence.",
+        )
         artifacts = []
 
         title_lower = task.title.lower()
 
         # Write end-user acceptance test plan
-        if "acceptance" in title_lower or "plan" in title_lower or "test" in title_lower:
+        if (
+            "acceptance" in title_lower
+            or "plan" in title_lower
+            or "test" in title_lower
+        ):
             plan = self._write_acceptance_plan(story)
             artifacts.append(
                 self.produce_artifact(
@@ -92,7 +101,7 @@ class TestWriterAgent(BaseAgent):
             "approach": "Given/When/Then scenarios based on acceptance criteria",
             "scenarios": [
                 {
-                    "id": f"AC-{i+1}",
+                    "id": f"AC-{i + 1}",
                     "criterion": criterion,
                     "given": f"The user is in the application context for '{story.title}'",
                     "when": f"The user performs the action described in: {criterion}",
@@ -119,18 +128,18 @@ class TestWriterAgent(BaseAgent):
         """Produce end-user acceptance test code."""
         slug = story.title.lower().replace(" ", "_").replace("-", "_")
         criteria_blocks = "\n\n".join(
-            f'    def test_acceptance_criterion_{i+1}(self):\n'
+            f"    def test_acceptance_criterion_{i + 1}(self):\n"
             f'        """\n'
-            f'        Criterion: {criterion}\n'
-            f'        Given the user is in the application\n'
-            f'        When the user performs the required action\n'
-            f'        Then the expected outcome is achieved\n'
+            f"        Criterion: {criterion}\n"
+            f"        Given the user is in the application\n"
+            f"        When the user performs the required action\n"
+            f"        Then the expected outcome is achieved\n"
             f'        """\n'
             f"        # End-user acceptance test for: {criterion}\n"
             f"        assert True  # Will be replaced with actual E2E steps"
             for i, criterion in enumerate(story.acceptance_criteria)
         ) or (
-            '    def test_feature_works_end_to_end(self):\n'
+            "    def test_feature_works_end_to_end(self):\n"
             f'        """Verify {story.title} works from the user perspective."""\n'
             f"        assert True  # Placeholder for E2E test"
         )

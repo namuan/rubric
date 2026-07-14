@@ -35,23 +35,27 @@ class DeveloperAgent(BaseAgent):
             **kwargs,
         )
 
-    def execute_step(self, step: TaskStep, task: Task, story: Story) -> Artifact:
-        """Execute a single TDD substep and return the produced artifact.
+    def execute(
+        self,
+        task: Task,
+        story: Story,
+        *,
+        step: TaskStep | None = None,
+    ) -> list[Artifact]:
+        """Execute either one TDD step or an entire non-TDD task.
 
-        This is the granular method — each call handles ONE small step
-        so the agent doesn't need to remember a lot of context.
+        ``step`` keeps TDD orchestration atomic while presenting one public
+        execution interface to the workflow engine and callers.
         """
-        if step.step_type == TaskStepType.RED:
-            return self._write_failing_test(step, task, story)
-        elif step.step_type == TaskStepType.GREEN:
-            return self._write_minimum_code(step, task, story)
-        elif step.step_type == TaskStepType.REFACTOR:
-            return self._refactor(step, task, story)
-        raise ValueError(f"Unknown step type: {step.step_type}")
+        self.prepare_execution(
+            task,
+            story,
+            "Implement the requested behaviour using Red-Green-Refactor.",
+        )
+        if step is not None:
+            return [self._execute_tdd_step(step, task, story)]
 
-    def execute(self, task: Task, story: Story) -> list[Artifact]:
-        """Execute all TDD steps for a task (fallback for legacy interface)."""
-        artifacts = []
+        artifacts: list[Artifact] = []
         title_lower = task.title.lower()
 
         # Handle non-TDD tasks (migrations, configs)
@@ -78,12 +82,20 @@ class DeveloperAgent(BaseAgent):
                 )
             )
         else:
-            # Default: run through TDD substeps
-            for step in task.steps:
-                artifact = self.execute_step(step, task, story)
-                artifacts.append(artifact)
+            for current_step in task.steps:
+                artifacts.extend(self.execute(task, story, step=current_step))
 
         return artifacts
+
+    def _execute_tdd_step(self, step: TaskStep, task: Task, story: Story) -> Artifact:
+        """Execute one Red-Green-Refactor step."""
+        if step.step_type == TaskStepType.RED:
+            return self._write_failing_test(step, task, story)
+        elif step.step_type == TaskStepType.GREEN:
+            return self._write_minimum_code(step, task, story)
+        elif step.step_type == TaskStepType.REFACTOR:
+            return self._refactor(step, task, story)
+        raise ValueError(f"Unknown step type: {step.step_type}")
 
     def _write_failing_test(self, step: TaskStep, task: Task, story: Story) -> Artifact:
         """RED: Write a failing test for one specific behavior."""

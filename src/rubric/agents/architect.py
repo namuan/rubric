@@ -33,6 +33,11 @@ class ArchitectAgent(BaseAgent):
         )
 
     def execute(self, task: Task, story: Story) -> list[Artifact]:
+        self.prepare_execution(
+            task,
+            story,
+            "Produce a maintainable technical design for this story.",
+        )
         artifacts = []
 
         if "architecture" in task.title.lower() or "design" in task.title.lower():
@@ -90,7 +95,10 @@ class ArchitectAgent(BaseAgent):
                 {"name": "presentation", "description": "API/CLI interface"},
                 {"name": "application", "description": "Business logic orchestration"},
                 {"name": "domain", "description": "Core domain models and rules"},
-                {"name": "infrastructure", "description": "Persistence, messaging, external services"},
+                {
+                    "name": "infrastructure",
+                    "description": "Persistence, messaging, external services",
+                },
             ],
             "components": [
                 f"Module for: {story.title}",
@@ -119,11 +127,31 @@ class ArchitectAgent(BaseAgent):
         slug = story.title.lower().replace(" ", "_").replace("-", "_")
         return {
             "endpoints": [
-                {"method": "GET", "path": f"/api/v1/{slug}", "description": f"List {story.title}"},
-                {"method": "POST", "path": f"/api/v1/{slug}", "description": f"Create {story.title}"},
-                {"method": "GET", "path": f"/api/v1/{slug}/{{id}}", "description": f"Get {story.title} by ID"},
-                {"method": "PUT", "path": f"/api/v1/{slug}/{{id}}", "description": f"Update {story.title}"},
-                {"method": "DELETE", "path": f"/api/v1/{slug}/{{id}}", "description": f"Delete {story.title}"},
+                {
+                    "method": "GET",
+                    "path": f"/api/v1/{slug}",
+                    "description": f"List {story.title}",
+                },
+                {
+                    "method": "POST",
+                    "path": f"/api/v1/{slug}",
+                    "description": f"Create {story.title}",
+                },
+                {
+                    "method": "GET",
+                    "path": f"/api/v1/{slug}/{{id}}",
+                    "description": f"Get {story.title} by ID",
+                },
+                {
+                    "method": "PUT",
+                    "path": f"/api/v1/{slug}/{{id}}",
+                    "description": f"Update {story.title}",
+                },
+                {
+                    "method": "DELETE",
+                    "path": f"/api/v1/{slug}/{{id}}",
+                    "description": f"Delete {story.title}",
+                },
             ],
             "authentication": "Bearer token",
             "response_format": "JSON",

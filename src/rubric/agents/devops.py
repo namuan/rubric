@@ -22,11 +22,21 @@ class DevOpsAgent(BaseAgent):
         super().__init__(
             name=name,
             role=Role.DEVOPS,
-            capabilities=["ci_cd", "deployment", "infrastructure", "release_management"],
+            capabilities=[
+                "ci_cd",
+                "deployment",
+                "infrastructure",
+                "release_management",
+            ],
             **kwargs,
         )
 
     def execute(self, task: Task, story: Story) -> list[Artifact]:
+        self.prepare_execution(
+            task,
+            story,
+            "Create reliable deployment, release, and operational artefacts.",
+        )
         artifacts = []
 
         title_lower = task.title.lower()
@@ -52,14 +62,41 @@ class DevOpsAgent(BaseAgent):
                     task,
                 )
             )
+            artifacts.append(
+                self.produce_artifact(
+                    ArtifactType.CONFIG,
+                    f"Runtime Config: {story.title}",
+                    self._create_runtime_config(story),
+                    story,
+                    task,
+                )
+            )
 
-        if "release" in title_lower:
+        if "release" in title_lower or "documentation" in title_lower:
             release = self._create_release(story)
             artifacts.append(
                 self.produce_artifact(
                     ArtifactType.RELEASE_NOTES,
                     f"Release: {story.title}",
                     release,
+                    story,
+                    task,
+                )
+            )
+            artifacts.append(
+                self.produce_artifact(
+                    ArtifactType.CHANGELOG,
+                    f"Changelog: {story.title}",
+                    self._create_changelog(story),
+                    story,
+                    task,
+                )
+            )
+            artifacts.append(
+                self.produce_artifact(
+                    ArtifactType.DOCUMENTATION,
+                    f"Documentation: {story.title}",
+                    self._create_documentation(story),
                     story,
                     task,
                 )
@@ -104,6 +141,14 @@ class DevOpsAgent(BaseAgent):
             "rollback_strategy": "automatic",
         }
 
+    def _create_runtime_config(self, story: Story) -> dict:
+        return {
+            "service": story.title.lower().replace(" ", "-"),
+            "environment": "staging",
+            "log_level": "INFO",
+            "health_check": "/health",
+        }
+
     def _create_release(self, story: Story) -> dict:
         return {
             "version": "1.0.0",
@@ -111,4 +156,20 @@ class DevOpsAgent(BaseAgent):
             "changes": [story.description],
             "breaking_changes": [],
             "migration_required": False,
+        }
+
+    def _create_changelog(self, story: Story) -> dict:
+        return {
+            "version": "1.0.0",
+            "added": list(story.acceptance_criteria),
+            "changed": [story.description],
+            "fixed": [],
+        }
+
+    def _create_documentation(self, story: Story) -> dict:
+        return {
+            "title": story.title,
+            "overview": story.description,
+            "acceptance_criteria": story.acceptance_criteria,
+            "deployment": "Deploy through the configured CI pipeline.",
         }
