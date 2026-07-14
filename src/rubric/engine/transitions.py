@@ -28,9 +28,28 @@ class TransitionGate:
 
 # ── Built-in Gates ────────────────────────────────────────────────────
 
+
+def _tasks_for_current_stage(story: Story) -> list:
+    """Return tasks belonging to the stage the story is leaving.
+
+    Planned implementation work is deliberately created during planning, so
+    checking every task on the story would prevent the story from ever leaving
+    planning.  Older callers can still create unscoped tasks; in that case
+    those tasks remain subject to the gate.
+    """
+    current_stage_tasks = [
+        task for task in story.tasks if task.stage == story.state.value
+    ]
+    if current_stage_tasks:
+        return current_stage_tasks
+    return [task for task in story.tasks if task.stage is None]
+
 ALL_TASKS_COMPLETE = TransitionGate(
     name="all_tasks_complete",
-    check=lambda story: all(t.status == TaskStatus.DONE for t in story.tasks) if story.tasks else True,
+    check=lambda story: all(
+        task.status == TaskStatus.DONE
+        for task in _tasks_for_current_stage(story)
+    ),
     description="All tasks for the current stage must be complete",
 )
 

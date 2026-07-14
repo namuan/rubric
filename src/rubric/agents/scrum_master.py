@@ -11,6 +11,7 @@ from rubric.models.story import (
     TaskStep,
     TaskStepType,
     TaskPriority,
+    StoryState,
     Story,
 )
 from rubric.models.artifacts import Artifact, ArtifactType
@@ -73,6 +74,7 @@ class ScrumMasterAgent(BaseAgent):
             description="Verify all pieces work together end-to-end",
             required_role="developer",
             priority=TaskPriority.HIGH,
+            stage=StoryState.IMPLEMENTATION.value,
             steps=self._tdd_steps("Integration verification", "Verify all pieces work together"),
         )
         if tasks:
@@ -105,6 +107,7 @@ class ScrumMasterAgent(BaseAgent):
             description=description,
             required_role="developer",
             priority=TaskPriority.HIGH,
+            stage=StoryState.IMPLEMENTATION.value,
         )
 
         # Generate TDD substeps

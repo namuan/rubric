@@ -115,7 +115,9 @@ class Task(BaseModel):
     description: str = ""
     status: TaskStatus = TaskStatus.PENDING
     priority: TaskPriority = TaskPriority.MEDIUM
+    stage: str | None = None
     assigned_agent: str | None = None
+    blocker_reason: str | None = None
     required_role: str | None = None
     dependencies: list[str] = Field(default_factory=list)  # Task IDs
     steps: list[TaskStep] = Field(default_factory=list)  # TDD substeps
@@ -164,6 +166,13 @@ class Task(BaseModel):
 
     def complete(self) -> None:
         self.status = TaskStatus.DONE
+        self.blocker_reason = None
+        self.updated_at = datetime.now(timezone.utc)
+
+    def block(self, reason: str) -> None:
+        """Mark the task as blocked and retain the reason for operators."""
+        self.status = TaskStatus.BLOCKED
+        self.blocker_reason = reason
         self.updated_at = datetime.now(timezone.utc)
 
     def all_steps_done(self) -> bool:

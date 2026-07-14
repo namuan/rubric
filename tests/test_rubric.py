@@ -26,6 +26,7 @@ from rubric.agents import (
     ScrumMasterAgent,
 )
 from rubric.orchestrator import run_full_pipeline, create_default_team
+import rubric.orchestrator as orchestrator
 
 
 # ── Story Model Tests ─────────────────────────────────────────────────
@@ -300,6 +301,7 @@ class TestWorkflowEngine:
     def test_create_and_transition(self):
         engine = WorkflowEngine()
         story = engine.create_story("Test", "Description")
+        story.acceptance_criteria = ["A criterion"]
         assert story.state == StoryState.INCEPTION
         engine.transition_story(story.id, StoryState.PLANNING)
         assert story.state == StoryState.PLANNING
@@ -345,6 +347,64 @@ class TestWorkflowEngine:
         assert len(artifacts) == 3
         assert task.status == TaskStatus.DONE
         assert all(s.status == TaskStepStatus.DONE for s in task.steps)
+
+    def test_artifact_registration_is_owned_by_engine_and_idempotent(self):
+        engine = WorkflowEngine()
+        story = engine.create_story("Test", "Desc")
+        task = Task(title="Define acceptance criteria")
+        story.tasks = [task]
+        po = ProductOwnerAgent(name="PO")
+        po.bind(engine)
+
+        artifact = po.execute(task, story)[0]
+        assert artifact.id not in engine.artifacts
+
+        engine.add_artifact(artifact)
+        engine.add_artifact(artifact)
+        assert list(engine.artifacts) == [artifact.id]
+        assert story.artifacts == [artifact.id]
+
+    def test_gate_failure_blocks_story_with_reason(self):
+        engine = WorkflowEngine()
+        story = engine.create_story("Test", "Desc")
+
+        transitioned = engine.transition_story(story.id, StoryState.PLANNING)
+
+        assert not transitioned
+        assert story.state == StoryState.BLOCKED
+        assert "has_acceptance_criteria" in story.history[-1]["reason"]
+
+    def test_invalid_transition_blocks_story_instead_of_raising(self):
+        engine = WorkflowEngine()
+        story = engine.create_story("Test", "Desc")
+        story.acceptance_criteria = ["A criterion"]
+
+        transitioned = engine.transition_story(story.id, StoryState.DELIVERY)
+
+        assert not transitioned
+        assert story.state == StoryState.BLOCKED
+        assert "Invalid transition" in story.history[-1]["reason"]
+
+    def test_execution_retries_then_blocks_task(self):
+        class FailingAgent:
+            attempts = 0
+
+            def execute(self, task, story):
+                self.attempts += 1
+                raise RuntimeError("provider unavailable")
+
+        engine = WorkflowEngine(max_execution_attempts=2)
+        story = engine.create_story("Test", "Desc")
+        task = Task(title="Work item")
+        story.tasks = [task]
+        agent = FailingAgent()
+
+        artifacts = engine.execute_agent_task(story.id, task.id, agent)
+
+        assert artifacts is None
+        assert agent.attempts == 2
+        assert task.status == TaskStatus.BLOCKED
+        assert "provider unavailable" in (task.blocker_reason or "")
 
 
 # ── Agent Execution Tests ─────────────────────────────────────────────
@@ -434,6 +494,33 @@ class TestAgentExecution:
 
 
 class TestFullPipeline:
+    def test_product_owner_executes_while_story_is_in_inception(self, monkeypatch):
+        class RecordingProductOwner(ProductOwnerAgent):
+            observed_state = None
+
+            def execute(self, task, story):
+                self.observed_state = story.state
+                return super().execute(task, story)
+
+        team = create_default_team()
+        product_owner = RecordingProductOwner(name="Recording PO")
+        team[0] = product_owner
+        monkeypatch.setattr(orchestrator, "create_default_team", lambda: team)
+
+        result = orchestrator.run_full_pipeline("Feature", "Description")
+
+        assert product_owner.observed_state == StoryState.INCEPTION
+        assert result["story"]["state"] == "done"
+
+    def test_pipeline_blocks_instead_of_completing_an_unassigned_task(self, monkeypatch):
+        monkeypatch.setattr(orchestrator, "create_default_team", lambda: [])
+
+        result = orchestrator.run_full_pipeline("Feature", "Description")
+
+        assert result["story"]["state"] == "blocked"
+        assert result["story"]["tasks_completed"] == 0
+        assert result["story"]["tasks_total"] == 1
+
     def test_run_full_pipeline(self):
         result = run_full_pipeline(
             title="Test Feature",

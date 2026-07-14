@@ -1,27 +1,27 @@
-"""Orchestrator — wires up agents, stories, and the engine for full pipeline execution."""
+"""Orchestrator — wires agents, stories, and the engine into a delivery pipeline."""
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import Any
 
-from rubric.engine.workflow import WorkflowEngine
-from rubric.models.story import (
-    Story, Task, StoryState, TaskPriority, TaskStatus,
-)
-from rubric.models.agent import Role
-from rubric.models.artifacts import ArtifactType
 from rubric.agents import (
-    ProductOwnerAgent,
     ArchitectAgent,
     DeveloperAgent,
-    ReviewerAgent,
-    TestWriterAgent,
     DevOpsAgent,
+    ProductOwnerAgent,
+    ReviewerAgent,
     ScrumMasterAgent,
+    TestWriterAgent,
 )
+from rubric.engine.workflow import WorkflowEngine
+from rubric.models.artifacts import Artifact
+from rubric.models.story import Story, StoryState, Task, TaskPriority
 
 logger = logging.getLogger(__name__)
+
+TaskExecutor = Callable[[Any, Task, Story], list[Artifact]]
 
 
 def create_default_team() -> list[Any]:
@@ -45,220 +45,306 @@ def find_agent_obj(agents: list[Any], agent_id: str) -> Any | None:
     return None
 
 
+def _task(
+    title: str,
+    description: str,
+    required_role: str,
+    priority: TaskPriority,
+    stage: StoryState,
+) -> Task:
+    return Task(
+        title=title,
+        description=description,
+        required_role=required_role,
+        priority=priority,
+        stage=stage.value,
+    )
+
+
+def _planning_executor(agent: Any, task: Task, story: Story) -> list[Artifact]:
+    """Plan implementation work once, then produce the planning artifact."""
+    implementation_tasks = [
+        current_task
+        for current_task in story.tasks
+        if current_task.stage == StoryState.IMPLEMENTATION.value
+    ]
+    if not implementation_tasks:
+        story.tasks.extend(agent.plan_story(story))
+    return agent.execute(task, story)
+
+
+def _run_stage(
+    engine: WorkflowEngine,
+    agents: list[Any],
+    story: Story,
+    target_state: StoryState,
+    next_state: StoryState | None,
+    agent_type: type[Any],
+    task_config: Task | list[Task],
+    executor: TaskExecutor | None = None,
+) -> bool:
+    """Run one stage, including assignment, execution, and its exit transition."""
+    if story.state != target_state:
+        if not engine.transition_story(
+            story.id,
+            target_state,
+            f"Entering {target_state.value} stage",
+        ):
+            return False
+
+    tasks = task_config if isinstance(task_config, list) else [task_config]
+    for task in tasks:
+        if not any(existing_task.id == task.id for existing_task in story.tasks):
+            story.tasks.append(task)
+
+    for task in tasks:
+        agent = engine.scheduler.find_best_agent(
+            task,
+            list(engine.agents.values()),
+            target_state.value,
+        )
+        if agent is None:
+            reason = f"No available agent for {target_state.value} task '{task.title}'"
+            logger.warning(reason)
+            engine.block_task(story.id, task.id, reason)
+            engine.block_story(story.id, reason)
+            return False
+
+        agent_handler = find_agent_obj(agents, agent.id)
+        if agent_handler is None or not isinstance(agent_handler, agent_type):
+            reason = (
+                f"No compatible {agent_type.__name__} handler for "
+                f"{target_state.value} task '{task.title}'"
+            )
+            logger.warning(reason)
+            engine.block_task(story.id, task.id, reason)
+            engine.block_story(story.id, reason)
+            return False
+
+        try:
+            engine.scheduler.assign_task(task, agent)
+        except Exception as error:
+            reason = f"Could not assign task '{task.title}': {error}"
+            logger.exception(reason)
+            engine.block_task(story.id, task.id, reason)
+            engine.block_story(story.id, reason)
+            return False
+
+        if isinstance(agent_handler, DeveloperAgent) and task.steps:
+            artifacts = engine.execute_task_tdd(story.id, task.id, agent_handler)
+        else:
+            artifacts = engine.execute_agent_task(
+                story.id,
+                task.id,
+                agent_handler,
+                executor,
+            )
+        if artifacts is None:
+            reason = f"{target_state.value} task '{task.title}' could not be completed"
+            engine.block_story(story.id, reason)
+            return False
+
+    if next_state is None:
+        return True
+    return engine.transition_story(
+        story.id,
+        next_state,
+        f"{target_state.value.capitalize()} stage complete",
+    )
+
+
+def _pipeline_result(engine: WorkflowEngine, story: Story) -> dict[str, Any]:
+    return {
+        "story": engine.story_summary(story.id),
+        "artifacts": [
+            artifact.summary()
+            for artifact in engine.get_artifacts_for_story(story.id)
+        ],
+        "engine_status": engine.status(),
+    }
+
+
 def run_full_pipeline(
     title: str,
     description: str,
     acceptance_criteria: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Run a complete story through the full delivery pipeline.
+    """Run a story from inception through delivery.
 
-    The flow:
-    1. INCEPTION   — PO defines story + acceptance criteria
-    2. PLANNING    — Scrum Master decomposes into small tasks with TDD substeps
-    3. DESIGN      — Architect designs architecture, API, data model
-    4. IMPLEMENTATION — Developer follows Red→Green→Refactor for each task
-    5. REVIEW      — Reviewer performs code review
-    6. ACCEPTANCE  — Test Writer runs end-user acceptance tests
-    7. INTEGRATION — DevOps sets up CI/CD and deploys
-    8. DELIVERY    — Release notes and documentation
+    Every stage is executed by the same guarded runner.  A missing agent,
+    assignment failure, exhausted execution retry, failed quality gate, or
+    unexpected exception leaves the story in a visible blocked state rather
+    than reporting unperformed work as complete.
     """
-    # 1. Create engine and team
     engine = WorkflowEngine()
-    agents = create_default_team()
-    for agent in agents:
-        agent.bind(engine)
+    story: Story | None = None
 
-    # 2. Create story
-    story = engine.create_story(title=title, description=description)
-    if acceptance_criteria:
-        story.acceptance_criteria = acceptance_criteria
+    try:
+        agents = create_default_team()
+        for agent in agents:
+            agent.bind(engine)
 
-    # ── INCEPTION ─────────────────────────────────────────────────────
-    engine.transition_story(story.id, StoryState.PLANNING, "Story created, entering planning")
+        story = engine.create_story(title=title, description=description)
+        if acceptance_criteria:
+            story.acceptance_criteria = acceptance_criteria
 
-    # PO defines acceptance criteria
-    po_agent = next(a for a in agents if isinstance(a, ProductOwnerAgent))
-    inception_task = Task(
-        title="Define acceptance criteria",
-        description="Product Owner defines what done looks like",
-        required_role="product_owner",
-        priority=TaskPriority.HIGH,
-    )
-    story.tasks = [inception_task]
-    agent = engine.scheduler.find_best_agent(inception_task, list(engine.agents.values()), "inception")
-    if agent:
-        engine.scheduler.assign_task(inception_task, agent)
-        artifacts = po_agent.execute(inception_task, story)
-        for art in artifacts:
-            engine.add_artifact(art)
-    engine.complete_task(story.id, inception_task.id)
+        if not _run_stage(
+            engine,
+            agents,
+            story,
+            StoryState.INCEPTION,
+            StoryState.PLANNING,
+            ProductOwnerAgent,
+            _task(
+                "Define acceptance criteria",
+                "Product Owner defines what done looks like",
+                "product_owner",
+                TaskPriority.HIGH,
+                StoryState.INCEPTION,
+            ),
+        ):
+            return _pipeline_result(engine, story)
 
-    # ── PLANNING ──────────────────────────────────────────────────────
-    # Scrum Master decomposes story into small tasks with TDD substeps
-    planner = next(a for a in agents if isinstance(a, ScrumMasterAgent))
-    planning_task = Task(
-        title="Break down into tasks",
-        description="Decompose into small TDD tasks",
-        required_role="scrum_master",
-        priority=TaskPriority.HIGH,
-    )
-    story.tasks.append(planning_task)
-    agent = engine.scheduler.find_best_agent(planning_task, list(engine.agents.values()), "planning")
-    if agent:
-        engine.scheduler.assign_task(planning_task, agent)
-        # Scrum Master plans the story — produces granular tasks
-        planned_tasks = planner.plan_story(story)
-        # Replace the placeholder tasks with the planned ones
-        story.tasks = [planning_task] + planned_tasks
-        artifacts = planner.execute(planning_task, story)
-        for art in artifacts:
-            engine.add_artifact(art)
-    engine.complete_task(story.id, planning_task.id)
+        if not _run_stage(
+            engine,
+            agents,
+            story,
+            StoryState.PLANNING,
+            StoryState.DESIGN,
+            ScrumMasterAgent,
+            _task(
+                "Break down into tasks",
+                "Decompose into small TDD tasks",
+                "scrum_master",
+                TaskPriority.HIGH,
+                StoryState.PLANNING,
+            ),
+            _planning_executor,
+        ):
+            return _pipeline_result(engine, story)
 
-    logger.info(
-        f"Planning complete: {len(story.tasks)} tasks, "
-        f"{sum(t.total_steps for t in story.tasks)} TDD substeps"
-    )
+        if not _run_stage(
+            engine,
+            agents,
+            story,
+            StoryState.DESIGN,
+            StoryState.IMPLEMENTATION,
+            ArchitectAgent,
+            [
+                _task(
+                    "Design system architecture",
+                    "Architect designs the system architecture",
+                    "architect",
+                    TaskPriority.HIGH,
+                    StoryState.DESIGN,
+                ),
+                _task(
+                    "Design API endpoints",
+                    "Architect defines the API contract",
+                    "architect",
+                    TaskPriority.MEDIUM,
+                    StoryState.DESIGN,
+                ),
+                _task(
+                    "Design data model",
+                    "Architect designs the data model and relationships",
+                    "architect",
+                    TaskPriority.MEDIUM,
+                    StoryState.DESIGN,
+                ),
+            ],
+        ):
+            return _pipeline_result(engine, story)
 
-    # ── DESIGN ────────────────────────────────────────────────────────
-    if story.state != StoryState.DESIGN:
-        engine.transition_story(story.id, StoryState.DESIGN, "Entering design stage")
+        implementation_tasks = [
+            task
+            for task in story.tasks
+            if task.stage == StoryState.IMPLEMENTATION.value
+        ]
+        if not _run_stage(
+            engine,
+            agents,
+            story,
+            StoryState.IMPLEMENTATION,
+            StoryState.REVIEW,
+            DeveloperAgent,
+            implementation_tasks,
+        ):
+            return _pipeline_result(engine, story)
 
-    architect = next(a for a in agents if isinstance(a, ArchitectAgent))
-    design_tasks = [
-        Task(
-            title="Design system architecture",
-            description="Architect designs the system architecture",
-            required_role="architect",
-            priority=TaskPriority.HIGH,
-        ),
-        Task(
-            title="Design API endpoints",
-            description="Architect defines the API contract",
-            required_role="architect",
-            priority=TaskPriority.MEDIUM,
-        ),
-        Task(
-            title="Design data model",
-            description="Architect designs the data model and relationships",
-            required_role="architect",
-            priority=TaskPriority.MEDIUM,
-        ),
-    ]
-    story.tasks.extend(design_tasks)
-    for dt in design_tasks:
-        agent = engine.scheduler.find_best_agent(dt, list(engine.agents.values()), "design")
-        if agent:
-            engine.scheduler.assign_task(dt, agent)
-            artifacts = architect.execute(dt, story)
-            for art in artifacts:
-                engine.add_artifact(art)
-        engine.complete_task(story.id, dt.id)
+        if not _run_stage(
+            engine,
+            agents,
+            story,
+            StoryState.REVIEW,
+            StoryState.ACCEPTANCE,
+            ReviewerAgent,
+            _task(
+                "Code review",
+                "Reviewer performs code review on all implementation",
+                "reviewer",
+                TaskPriority.HIGH,
+                StoryState.REVIEW,
+            ),
+        ):
+            return _pipeline_result(engine, story)
 
-    # ── IMPLEMENTATION (TDD) ──────────────────────────────────────────
-    if story.state != StoryState.IMPLEMENTATION:
-        engine.transition_story(story.id, StoryState.IMPLEMENTATION, "Entering implementation stage")
+        if not _run_stage(
+            engine,
+            agents,
+            story,
+            StoryState.ACCEPTANCE,
+            StoryState.INTEGRATION,
+            TestWriterAgent,
+            _task(
+                "Write and run end-user acceptance tests",
+                "Test Writer validates feature from user perspective",
+                "test_writer",
+                TaskPriority.HIGH,
+                StoryState.ACCEPTANCE,
+            ),
+        ):
+            return _pipeline_result(engine, story)
 
-    developer = next(a for a in agents if isinstance(a, DeveloperAgent))
-    # Execute each task through its TDD substeps
-    for task in story.tasks:
-        if task.status == TaskStatus.DONE:
-            continue
-        if task.required_role != "developer":
-            continue
-        if not task.steps:
-            continue
+        if not _run_stage(
+            engine,
+            agents,
+            story,
+            StoryState.INTEGRATION,
+            StoryState.DELIVERY,
+            DevOpsAgent,
+            _task(
+                "Set up CI pipeline and deploy to staging",
+                "DevOps creates CI/CD pipeline and deploys to staging",
+                "devops",
+                TaskPriority.HIGH,
+                StoryState.INTEGRATION,
+            ),
+        ):
+            return _pipeline_result(engine, story)
 
-        agent = engine.scheduler.find_best_agent(task, list(engine.agents.values()), "implementation")
-        if agent:
-            engine.scheduler.assign_task(task, agent)
-            # Drive Red→Green→Refactor for this task
-            artifacts = engine.execute_task_tdd(story.id, task.id, developer)
+        if not _run_stage(
+            engine,
+            agents,
+            story,
+            StoryState.DELIVERY,
+            StoryState.DONE,
+            DevOpsAgent,
+            _task(
+                "Create release notes and documentation",
+                "DevOps creates release documentation",
+                "devops",
+                TaskPriority.MEDIUM,
+                StoryState.DELIVERY,
+            ),
+        ):
+            return _pipeline_result(engine, story)
+    except Exception as error:
+        logger.exception("Pipeline failed; preserving the last known story state")
+        if story is not None:
+            engine.block_story(story.id, f"Pipeline error: {type(error).__name__}: {error}")
 
-    # ── REVIEW ────────────────────────────────────────────────────────
-    if story.state != StoryState.REVIEW:
-        engine.transition_story(story.id, StoryState.REVIEW, "Entering review stage")
-
-    reviewer = next(a for a in agents if isinstance(a, ReviewerAgent))
-    review_task = Task(
-        title="Code review",
-        description="Reviewer performs code review on all implementation",
-        required_role="reviewer",
-        priority=TaskPriority.HIGH,
-    )
-    story.tasks.append(review_task)
-    agent = engine.scheduler.find_best_agent(review_task, list(engine.agents.values()), "review")
-    if agent:
-        engine.scheduler.assign_task(review_task, agent)
-        artifacts = reviewer.execute(review_task, story)
-        for art in artifacts:
-            engine.add_artifact(art)
-    engine.complete_task(story.id, review_task.id)
-
-    # ── ACCEPTANCE ────────────────────────────────────────────────────
-    if story.state != StoryState.ACCEPTANCE:
-        engine.transition_story(story.id, StoryState.ACCEPTANCE, "Entering acceptance stage")
-
-    test_writer = next(a for a in agents if isinstance(a, TestWriterAgent))
-    acceptance_task = Task(
-        title="Write and run end-user acceptance tests",
-        description="Test Writer validates feature from user perspective",
-        required_role="test_writer",
-        priority=TaskPriority.HIGH,
-    )
-    story.tasks.append(acceptance_task)
-    agent = engine.scheduler.find_best_agent(acceptance_task, list(engine.agents.values()), "acceptance")
-    if agent:
-        engine.scheduler.assign_task(acceptance_task, agent)
-        artifacts = test_writer.execute(acceptance_task, story)
-        for art in artifacts:
-            engine.add_artifact(art)
-    engine.complete_task(story.id, acceptance_task.id)
-
-    # ── INTEGRATION ───────────────────────────────────────────────────
-    if story.state != StoryState.INTEGRATION:
-        engine.transition_story(story.id, StoryState.INTEGRATION, "Entering integration stage")
-
-    devops = next(a for a in agents if isinstance(a, DevOpsAgent))
-    integration_task = Task(
-        title="Set up CI pipeline and deploy to staging",
-        description="DevOps creates CI/CD pipeline and deploys to staging",
-        required_role="devops",
-        priority=TaskPriority.HIGH,
-    )
-    story.tasks.append(integration_task)
-    agent = engine.scheduler.find_best_agent(integration_task, list(engine.agents.values()), "integration")
-    if agent:
-        engine.scheduler.assign_task(integration_task, agent)
-        artifacts = devops.execute(integration_task, story)
-        for art in artifacts:
-            engine.add_artifact(art)
-    engine.complete_task(story.id, integration_task.id)
-
-    # ── DELIVERY ──────────────────────────────────────────────────────
-    if story.state != StoryState.DELIVERY:
-        engine.transition_story(story.id, StoryState.DELIVERY, "Entering delivery stage")
-
-    delivery_task = Task(
-        title="Create release notes and documentation",
-        description="DevOps and PO create release documentation",
-        required_role="devops",
-        priority=TaskPriority.MEDIUM,
-    )
-    story.tasks.append(delivery_task)
-    agent = engine.scheduler.find_best_agent(delivery_task, list(engine.agents.values()), "delivery")
-    if agent:
-        engine.scheduler.assign_task(delivery_task, agent)
-        artifacts = devops.execute(delivery_task, story)
-        for art in artifacts:
-            engine.add_artifact(art)
-    engine.complete_task(story.id, delivery_task.id)
-
-    # ── DONE ──────────────────────────────────────────────────────────
-    engine.transition_story(story.id, StoryState.DONE, "All stages complete")
-
-    return {
-        "story": engine.story_summary(story.id),
-        "artifacts": [a.summary() for a in engine.get_artifacts_for_story(story.id)],
-        "engine_status": engine.status(),
-    }
+    if story is None:
+        # This is only reachable if story creation itself fails.
+        return {"story": None, "artifacts": [], "engine_status": engine.status()}
+    return _pipeline_result(engine, story)

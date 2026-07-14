@@ -11,6 +11,7 @@ from rubric.models.story import (
 from rubric.models.agent import Agent, Role, STAGE_RESPONSIBILITIES
 from rubric.models.artifacts import Artifact, ArtifactType
 from rubric.engine.scheduler import TaskScheduler
+from rubric.engine.transitions import validate_transition
 from rubric.context.manager import ContextManager
 
 logger = logging.getLogger(__name__)
@@ -43,7 +44,9 @@ class WorkflowEngine:
     6. Handles blockers and backtracking
     """
 
-    def __init__(self) -> None:
+    def __init__(self, max_execution_attempts: int = 3) -> None:
+        if max_execution_attempts < 1:
+            raise ValueError("max_execution_attempts must be at least 1")
         self.scheduler = TaskScheduler()
         self.context = ContextManager()
         self.stories: dict[str, Story] = {}
@@ -51,6 +54,7 @@ class WorkflowEngine:
         self.agents: dict[str, Agent] = {}
         self.event_handlers: list[EventHandler] = []
         self._log: list[WorkflowEvent] = []
+        self.max_execution_attempts = max_execution_attempts
 
     # ── Agent Management ──────────────────────────────────────────────
 
@@ -79,10 +83,15 @@ class WorkflowEngine:
     # ── Artifact Management ───────────────────────────────────────────
 
     def add_artifact(self, artifact: Artifact) -> None:
+        """Register an artifact once and associate it with its story."""
+        if artifact.id in self.artifacts:
+            logger.debug("Artifact %s is already registered; skipping duplicate", artifact.id)
+            return
+
         self.artifacts[artifact.id] = artifact
         if artifact.story_id:
             story = self.stories.get(artifact.story_id)
-            if story:
+            if story and artifact.id not in story.artifacts:
                 story.artifacts.append(artifact.id)
         self._emit(
             "artifact_produced",
@@ -104,14 +113,61 @@ class WorkflowEngine:
         event = WorkflowEvent(event_type, story_id, data)
         self._log.append(event)
         for handler in self.event_handlers:
-            handler(event)
+            try:
+                handler(event)
+            except Exception:
+                # Observability must not make the delivery pipeline fail.
+                logger.exception("Workflow event handler failed for %s", event)
 
     # ── Stage Transitions ─────────────────────────────────────────────
 
-    def transition_story(self, story_id: str, new_state: StoryState, reason: str = "") -> None:
-        story = self.get_story(story_id)
+    def transition_story(self, story_id: str, new_state: StoryState, reason: str = "") -> bool:
+        """Transition a story, enforcing gates and safely containing failures.
+
+        Gate failures and invalid transitions leave the story in ``BLOCKED``
+        whenever the state machine allows it.  The boolean result lets callers
+        halt a pipeline cleanly instead of continuing after a failed change.
+        """
+        try:
+            story = self.get_story(story_id)
+        except KeyError:
+            logger.exception("Cannot transition missing story %s", story_id)
+            return False
+
         old_state = story.state
-        story.transition(new_state, reason)
+        if old_state == new_state:
+            return True
+
+        if new_state != StoryState.BLOCKED:
+            gates_passed, failures = validate_transition(story, new_state)
+            if not gates_passed:
+                failure_reason = (
+                    f"Quality gates failed before {new_state.value}: "
+                    + "; ".join(failures)
+                )
+                logger.warning("Story %s: %s", story_id, failure_reason)
+                self._emit("transition_gate_failed", story_id, {
+                    "from": old_state.value,
+                    "to": new_state.value,
+                    "failures": failures,
+                })
+                self._block_story(story, failure_reason)
+                return False
+
+        try:
+            story.transition(new_state, reason)
+        except ValueError as error:
+            failure_reason = f"Transition failed: {error}"
+            logger.exception("Story %s: %s", story_id, failure_reason)
+            self._emit("transition_failed", story_id, {
+                "from": old_state.value,
+                "to": new_state.value,
+                "reason": failure_reason,
+            })
+            if new_state != StoryState.BLOCKED:
+                self._block_story(story, failure_reason)
+            return False
+
         self.context.set(f"story:{story_id}:state", new_state.value)
         self._emit("story_transition", story_id, {
             "from": old_state.value,
@@ -119,6 +175,43 @@ class WorkflowEngine:
             "reason": reason,
         })
         logger.info(f"Story {story_id}: {old_state.value} -> {new_state.value}")
+        return True
+
+    def block_story(self, story_id: str, reason: str) -> bool:
+        """Move a story to BLOCKED without allowing a secondary error to escape."""
+        try:
+            story = self.get_story(story_id)
+        except KeyError:
+            logger.exception("Cannot block missing story %s", story_id)
+            return False
+        return self._block_story(story, reason)
+
+    def _block_story(self, story: Story, reason: str) -> bool:
+        if story.state == StoryState.BLOCKED:
+            return True
+
+        old_state = story.state
+        try:
+            story.transition(StoryState.BLOCKED, reason)
+        except ValueError:
+            logger.exception(
+                "Story %s could not transition from %s to blocked: %s",
+                story.id,
+                old_state.value,
+                reason,
+            )
+            self._emit("story_blocking_failed", story.id, {"reason": reason})
+            return False
+
+        self.context.set(f"story:{story.id}:state", StoryState.BLOCKED.value)
+        self._emit("story_transition", story.id, {
+            "from": old_state.value,
+            "to": StoryState.BLOCKED.value,
+            "reason": reason,
+        })
+        self._emit("story_blocked", story.id, {"reason": reason})
+        logger.error("Story %s blocked: %s", story.id, reason)
+        return True
 
     # ── Task + TDD Step Execution ─────────────────────────────────────
 
@@ -143,10 +236,36 @@ class WorkflowEngine:
                     "agent_name": agent.name,
                 })
                 logger.info(f"Assigned task '{task.title}' to {agent.name}")
+            else:
+                self.block_task(
+                    story_id,
+                    task.id,
+                    "No available agent could be assigned to the task",
+                )
 
         return assignments
 
-    def execute_task_tdd(self, story_id: str, task_id: str, agent_handler: Any) -> list[Artifact]:
+    def execute_agent_task(
+        self,
+        story_id: str,
+        task_id: str,
+        agent_handler: Any,
+        executor: Callable[[Any, Task, Story], list[Artifact]] | None = None,
+    ) -> list[Artifact] | None:
+        """Execute a non-TDD task with retries and block it on exhaustion."""
+        story, task = self._get_story_task(story_id, task_id)
+        execute = executor or (lambda handler, current_task, current_story: handler.execute(
+            current_task, current_story,
+        ))
+        return self._execute_with_retries(
+            story,
+            task,
+            lambda: execute(agent_handler, task, story),
+        )
+
+    def execute_task_tdd(
+        self, story_id: str, task_id: str, agent_handler: Any
+    ) -> list[Artifact] | None:
         """Execute a task through its TDD substeps using the provided agent handler.
 
         This drives the Red→Green→Refactor cycle for a single task.
@@ -154,12 +273,18 @@ class WorkflowEngine:
 
         Returns all artifacts produced during the cycle.
         """
-        story = self.get_story(story_id)
-        task = next((t for t in story.tasks if t.id == task_id), None)
-        if task is None:
-            raise KeyError(f"Task {task_id} not found in story {story_id}")
+        story, task = self._get_story_task(story_id, task_id)
+        return self._execute_with_retries(
+            story,
+            task,
+            lambda: self._execute_tdd_steps(story, task, agent_handler),
+        )
 
-        all_artifacts = []
+    def _execute_tdd_steps(
+        self, story: Story, task: Task, agent_handler: Any
+    ) -> list[Artifact]:
+        """Execute uncompleted TDD steps once; retry policy lives above this method."""
+        all_artifacts: list[Artifact] = []
 
         for step in task.steps:
             if step.status == TaskStepStatus.DONE:
@@ -168,35 +293,78 @@ class WorkflowEngine:
             step.status = TaskStepStatus.IN_PROGRESS
             step.updated_at = __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
 
-            self._emit("step_started", story_id, {
-                "task_id": task_id,
+            self._emit("step_started", story.id, {
+                "task_id": task.id,
                 "step_id": step.id,
                 "step_type": step.step_type.value,
                 "step_title": step.title,
             })
 
             artifact = agent_handler.execute_step(step, task, story)
-            self.add_artifact(artifact)
             all_artifacts.append(artifact)
 
-            self._emit("step_completed", story_id, {
-                "task_id": task_id,
+            self._emit("step_completed", story.id, {
+                "task_id": task.id,
                 "step_id": step.id,
                 "step_type": step.step_type.value,
             })
             logger.info(f"  [{step.step_type.value:9s}] {step.title}")
 
-        # All steps done — mark task complete
-        if task.all_steps_done():
-            self.complete_task(story_id, task_id)
-
         return all_artifacts
 
-    def complete_task(self, story_id: str, task_id: str) -> Task:
+    def _execute_with_retries(
+        self,
+        story: Story,
+        task: Task,
+        execute: Callable[[], list[Artifact]],
+    ) -> list[Artifact] | None:
+        """Run agent work, retrying failures and retaining a clear blocker."""
+        last_error: Exception | None = None
+
+        for attempt in range(1, self.max_execution_attempts + 1):
+            try:
+                artifacts = execute()
+                if artifacts is None:
+                    raise RuntimeError("Agent returned no artifact collection")
+                for artifact in artifacts:
+                    self.add_artifact(artifact)
+                self.complete_task(story.id, task.id)
+                return artifacts
+            except Exception as error:
+                last_error = error
+                logger.exception(
+                    "Task %s execution failed (attempt %d/%d)",
+                    task.id,
+                    attempt,
+                    self.max_execution_attempts,
+                )
+                self._emit("task_execution_failed", story.id, {
+                    "task_id": task.id,
+                    "attempt": attempt,
+                    "max_attempts": self.max_execution_attempts,
+                    "error": str(error),
+                })
+
+        reason = (
+            f"Execution failed after {self.max_execution_attempts} attempts: "
+            f"{last_error}"
+        )
+        self.block_task(story.id, task.id, reason)
+        return None
+
+    def _get_story_task(self, story_id: str, task_id: str) -> tuple[Story, Task]:
         story = self.get_story(story_id)
-        task = next((t for t in story.tasks if t.id == task_id), None)
+        task = next((task for task in story.tasks if task.id == task_id), None)
         if task is None:
             raise KeyError(f"Task {task_id} not found in story {story_id}")
+        return story, task
+
+    def complete_task(self, story_id: str, task_id: str) -> Task:
+        story, task = self._get_story_task(story_id, task_id)
+        if task.status == TaskStatus.BLOCKED:
+            raise RuntimeError(f"Cannot complete blocked task {task_id}")
+        if not task.all_steps_done():
+            raise ValueError(f"Cannot complete task {task_id} with unfinished TDD steps")
 
         task.complete()
 
@@ -209,6 +377,23 @@ class WorkflowEngine:
             "progress": story.progress,
         })
         logger.info(f"Task completed: {task.title} (progress: {story.progress:.0%})")
+        return task
+
+    def block_task(self, story_id: str, task_id: str, reason: str) -> Task:
+        """Mark unfinished work as blocked and release any assigned agent."""
+        story, task = self._get_story_task(story_id, task_id)
+        if task.status == TaskStatus.DONE:
+            logger.warning("Refusing to block completed task %s", task_id)
+            return task
+
+        if task.assigned_agent and task.assigned_agent in self.agents:
+            self.agents[task.assigned_agent].finish_task(task_id)
+        task.block(reason)
+        self._emit("task_blocked", story_id, {
+            "task_id": task.id,
+            "reason": reason,
+        })
+        logger.warning("Task blocked: %s — %s", task.title, reason)
         return task
 
     def check_stage_complete(self, story_id: str) -> bool:

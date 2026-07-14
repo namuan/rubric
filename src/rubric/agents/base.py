@@ -49,7 +49,11 @@ class BaseAgent(ABC):
         story: Story,
         task: Task,
     ) -> Artifact:
-        """Helper to create and register an artifact."""
+        """Create an artifact for the workflow engine to register.
+
+        Agents are producers only.  Registration is owned by the execution
+        layer so one artifact has one authoritative registration point.
+        """
         artifact = Artifact(
             artifact_type=artifact_type,
             name=name,
@@ -58,8 +62,6 @@ class BaseAgent(ABC):
             story_id=story.id,
             task_id=task.id,
         )
-        if self.engine:
-            self.engine.add_artifact(artifact)
         return artifact
 
     def __repr__(self) -> str:
