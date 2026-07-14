@@ -1,0 +1,94 @@
+{
+  "//": "Workflow Engine — LLM Configuration Example",
+  "//_": "Copy this file to config/llm_config.json and adjust for your providers.",
+  "//__": "Each agent role maps to a model provider and settings.",
+
+  "default_provider": "openai",
+
+  "providers": {
+    "openai": {
+      "api_key_env": "OPENAI_API_KEY",
+      "base_url": "https://api.openai.com/v1",
+      "default_model": "gpt-4o"
+    },
+    "anthropic": {
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "base_url": "https://api.anthropic.com/v1",
+      "default_model": "claude-sonnet-4-20250514"
+    },
+    "openrouter": {
+      "api_key_env": "OPENROUTER_API_KEY",
+      "base_url": "https://openrouter.ai/api/v1",
+      "default_model": "anthropic/claude-sonnet-4"
+    },
+    "ollama": {
+      "api_key_env": "",                "base_url": "http://localhost:11434/v1",
+      "default_model": "llama3.3-70b"
+    },
+    "vllm": {
+      "api_key_env": "VLLM_API_KEY",
+      "base_url": "http://localhost:8000/v1",
+      "default_model": "Qwen/Qwen2.5-72B-Instruct"
+    }
+  },
+
+  "agents": {
+    "product_owner": {
+      "provider": "openai",
+      "model": "gpt-4o",
+      "temperature": 0.7,
+      "max_tokens": 2048,
+      "system_prompt": "You are a Product Owner. Write clear user stories with acceptance criteria. Focus on business value and user needs."
+    },
+    "architect": {
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-20250514",
+      "temperature": 0.3,
+      "max_tokens": 4096,
+      "system_prompt": "You are a Software Architect. Design clean, scalable system architectures. Produce API specs, data models, and technical design documents."
+    },
+    "developer": {
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-20250514",
+      "temperature": 0.2,
+      "max_tokens": 8192,
+      "system_prompt": "You are a Developer practicing Test-Driven Development. Follow Red-Green-Refactor strictly. Write the minimum code to pass each test, then refactor."
+    },
+    "reviewer": {
+      "provider": "openai",
+      "model": "gpt-4o",
+      "temperature": 0.3,
+      "max_tokens": 4096,
+      "system_prompt": "You are a Code Reviewer. Check for correctness, readability, testability, security, and performance. Suggest concrete improvements."
+    },
+    "test_writer": {
+      "provider": "openai",
+      "model": "gpt-4o",
+      "temperature": 0.4,
+      "max_tokens": 4096,
+      "system_prompt": "You are a Test Writer focused on end-user acceptance testing. Write Given/When/Then scenarios from the user's perspective. Use tools like Playwright or pytest-bdd."
+    },
+    "devops": {
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-20250514",
+      "temperature": 0.2,
+      "max_tokens": 4096,
+      "system_prompt": "You are a DevOps engineer. Create CI/CD pipelines, deployment configurations, and infrastructure-as-code. Prioritise reliability and observability."
+    },
+    "scrum_master": {
+      "provider": "openai",
+      "model": "gpt-4o",
+      "temperature": 0.5,
+      "max_tokens": 2048,
+      "system_prompt": "You are a Scrum Master and Planner. Break stories into small, focused tasks. Each task must be small enough that one agent can complete it without needing the full story context."
+    }
+  },
+
+  "global": {
+    "temperature": 0.3,
+    "max_tokens": 4096,
+    "timeout_seconds": 120,
+    "max_retries": 3,
+    "retry_delay_seconds": 2
+  }
+}

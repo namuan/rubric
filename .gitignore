@@ -1,0 +1,82 @@
+# ── Python ────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+*.whl
+*.egg-info/
+.installed.cfg
+
+# ── Virtual environments ───────────────────────────────
+.venv/
+venv/
+env/
+.env/
+.venv*/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ── Testing ─────────────────────────────────────────────
+.pytest_cache/
+.pytest_cache/
+*.coverage
+.coverage
+coverage/
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+
+# ── IDE / Editor ────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+*.sublime-project
+*.sublime-workspace
+.project
+.pydevproject
+*.sublime-workspace
+
+# ── OS ──────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini
+._*
+
+# ── Secrets / Environment ───────────────────────────────
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+*.cert
+
+# ── Build artifacts ─────────────────────────────────────
+*.so
+*.dylib
+*.dll
+*.lib
+*.exp
+*.obj
+
+# ── Logs ────────────────────────────────────────────────
+*.log
+logs/
+log/
+
+# ── Jupyter / Notebooks ─────────────────────────────────
+.ipynb_checkpoints/
+
+# ── Project-specific runtime ────────────────────────────
+# Uncomment if you generate any runtime data:
+# data/
+# output/
+# temp/
