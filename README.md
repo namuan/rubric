@@ -61,29 +61,29 @@ Each step is small enough that an agent only needs to focus on one thing at a ti
 ## Prerequisites
 
 - **Python 3.11 or later**
-- `pip` (Python package manager)
+- [uv](https://docs.astral.sh/uv/) (package and project manager)
 
 ## Installation
 
 ### 1. Clone or create the project
 
 ```bash
-# Navigate to your project directory
-cd /path/to/rubric
+git clone https://github.com/namuan/rubric.git
+cd rubric
 ```
 
 ### 2. Install the package
 
 ```bash
-pip install -e ".[dev]"
+uv sync
 ```
 
-This installs Rubric in editable mode with development dependencies (pytest).
+This installs Rubric in editable mode with development dependencies (pytest, pytest-asyncio).
 
 ### 3. Verify installation
 
 ```bash
-python -m rubric.cli --help
+uv run rubric --help
 ```
 
 You should see the CLI help output.
@@ -95,7 +95,7 @@ You should see the CLI help output.
 ### Run a story through the full pipeline
 
 ```bash
-python -m rubric.cli run "User Authentication" \
+uv run rubric run "User Authentication" \
   --description "JWT-based authentication system" \
   --criteria "Users can register with email and password" \
   --criteria "Users can log in and receive a JWT token" \
@@ -131,7 +131,7 @@ print(f"TDD Steps: {result['story']['tdd_steps_completed']}/{result['story']['td
 ### Run the example script
 
 ```bash
-python examples/basic_story.py
+uv run python examples/basic_story.py
 ```
 
 ---
@@ -139,7 +139,7 @@ python examples/basic_story.py
 ## Running Tests
 
 ```bash
-pytest tests/ -v
+uv run pytest tests/ -v
 ```
 
 All 38 tests should pass with zero warnings.
@@ -206,7 +206,7 @@ rubric run <title> \
 Example with JSON output:
 
 ```bash
-python -m rubric.cli run "Feature" --output json | jq .
+uv run rubric run "Feature" --output json | jq .
 ```
 
 ---
