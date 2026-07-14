@@ -6,6 +6,7 @@ import argparse
 import json
 import logging
 import sys
+from pathlib import Path
 
 from rubric.llm.config import default_config_path as llm_config_path
 from rubric.orchestrator import run_full_pipeline
@@ -52,6 +53,12 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument(
         "--event-log",
         help="Append workflow events to this JSON-lines file",
+    )
+    run_parser.add_argument(
+        "--work-dir",
+        "-w",
+        default=".",
+        help="Directory to write agent output files (default: current directory)",
     )
 
     # ── config command ─────────────────────────────────────────────────
@@ -102,10 +109,12 @@ def _handle_run(args: argparse.Namespace) -> None:
     # ── Startup info ──────────────────────────────────────────────────
     llm_source = llm_config_path()
     llm_info = _describe_llm_status()
+    work_dir = str(Path(args.work_dir).resolve())
 
     if output_format == "text":
         print(f"Config : {llm_source or 'none (using defaults)'}", file=sys.stderr)
         print(f"LLM    : {llm_info}", file=sys.stderr)
+        print(f"Output : {work_dir}", file=sys.stderr)
         print(file=sys.stderr)
 
     criteria = args.criteria if args.criteria else None
@@ -115,6 +124,7 @@ def _handle_run(args: argparse.Namespace) -> None:
         acceptance_criteria=criteria,
         persistence_path=args.state_file,
         event_log_path=args.event_log,
+        work_dir=args.work_dir,
     )
 
     if output_format == "json":
@@ -189,6 +199,14 @@ def _print_text(result: dict) -> None:
         print("  " + "-" * 40)
         for name, util in status["agent_utilization"].items():
             print(f"    {name:20s} {util}")
+        print()
+
+    files = status.get("files_written", 0)
+    wdir = status.get("work_dir")
+    if wdir:
+        print(f"  Files written: {files} -> {wdir}")
+    elif files:
+        print(f"  Files written: {files}")
     print()
     print("=" * 60)
     print()

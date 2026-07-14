@@ -201,6 +201,7 @@ def run_full_pipeline(
     acceptance_criteria: list[str] | None = None,
     persistence_path: str | None = None,
     event_log_path: str | None = None,
+    work_dir: str | None = None,
 ) -> dict[str, Any]:
     """Run a story from inception through delivery.
 
@@ -212,6 +213,7 @@ def run_full_pipeline(
     engine = WorkflowEngine(
         persistence_path=persistence_path,
         event_log_path=event_log_path,
+        work_dir=work_dir,
     )
     story: Story | None = None
 
@@ -406,6 +408,7 @@ async def run_full_pipeline_async(
     acceptance_criteria: list[str] | None = None,
     persistence_path: str | None = None,
     event_log_path: str | None = None,
+    work_dir: str | None = None,
 ) -> dict[str, Any]:
     """Run one pipeline without blocking an asyncio event loop.
 
@@ -419,6 +422,7 @@ async def run_full_pipeline_async(
         acceptance_criteria=acceptance_criteria,
         persistence_path=persistence_path,
         event_log_path=event_log_path,
+        work_dir=work_dir,
     )
 
 

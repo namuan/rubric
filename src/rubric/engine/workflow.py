@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import re
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 from rubric.models.story import Story, StoryState, Task, TaskStatus, TaskStepStatus
 from rubric.models.agent import Agent, Role
-from rubric.models.artifacts import Artifact
+from rubric.models.artifacts import Artifact, ArtifactType
 from rubric.engine.scheduler import TaskScheduler
 from rubric.engine.transitions import validate_transition
 from rubric.engine.event_logger import EventLogger
@@ -54,6 +57,7 @@ class WorkflowEngine:
         max_execution_attempts: int = 3,
         persistence_path: str | Path | None = None,
         event_log_path: str | Path | None = None,
+        work_dir: str | Path | None = None,
     ) -> None:
         if max_execution_attempts < 1:
             raise ValueError("max_execution_attempts must be at least 1")
@@ -65,6 +69,8 @@ class WorkflowEngine:
         self.event_handlers: list[EventHandler] = []
         self._log: list[WorkflowEvent] = []
         self.max_execution_attempts = max_execution_attempts
+        self.work_dir: Path | None = Path(work_dir) if work_dir else None
+        self._files_written: int = 0
         state_path = persistence_path or os.getenv("RUBRIC_STATE_FILE")
         self.persistence = JsonWorkflowStore(state_path) if state_path else None
         self._restore_state()
@@ -119,6 +125,90 @@ class WorkflowEngine:
             {"artifact_id": artifact.id, "type": artifact.artifact_type.value},
         )
         logger.info(f"Artifact produced: {artifact.summary()}")
+
+        if self.work_dir:
+            self._write_artifact(artifact)
+
+    # ── File output ────────────────────────────────────────────────────
+
+    # Extension per artifact type (applied after slugified name).
+    _EXTENSIONS: dict[ArtifactType, str] = {
+        ArtifactType.SOURCE_CODE: ".py",
+        ArtifactType.TEST_CODE: ".py",
+        ArtifactType.MIGRATION: ".py",
+        ArtifactType.CONFIG: ".yml",
+        ArtifactType.CI_CONFIG: ".yml",
+        ArtifactType.DEPLOYMENT_CONFIG: ".yml",
+        ArtifactType.API_SPEC: ".json",
+        ArtifactType.DATA_MODEL: ".json",
+        ArtifactType.TASK_BREAKDOWN: ".json",
+        ArtifactType.SPRINT_PLAN: ".json",
+        ArtifactType.TEST_PLAN: ".json",
+        ArtifactType.TEST_REPORT: ".json",
+    }
+
+    _DEFAULT_EXT = ".md"
+
+    # Stage subdirectory for each artifact type.
+    _STAGE_DIRS: dict[ArtifactType, str] = {
+        ArtifactType.STORY_BRIEF: "inception",
+        ArtifactType.ACCEPTANCE_CRITERIA: "inception",
+        ArtifactType.TASK_BREAKDOWN: "planning",
+        ArtifactType.SPRINT_PLAN: "planning",
+        ArtifactType.ARCHITECTURE_DIAGRAM: "design",
+        ArtifactType.API_SPEC: "design",
+        ArtifactType.DATA_MODEL: "design",
+        ArtifactType.TECH_DESIGN: "design",
+        ArtifactType.SOURCE_CODE: "implementation",
+        ArtifactType.MIGRATION: "implementation",
+        ArtifactType.CONFIG: "implementation",
+        ArtifactType.TEST_CODE: "implementation",
+        ArtifactType.REVIEW_FEEDBACK: "review",
+        ArtifactType.REFACTOR_SUGGESTION: "review",
+        ArtifactType.TEST_PLAN: "acceptance",
+        ArtifactType.TEST_REPORT: "acceptance",
+        ArtifactType.CI_CONFIG: "integration",
+        ArtifactType.DEPLOYMENT_CONFIG: "integration",
+        ArtifactType.CHANGELOG: "delivery",
+        ArtifactType.DOCUMENTATION: "delivery",
+        ArtifactType.RELEASE_NOTES: "delivery",
+    }
+
+    @staticmethod
+    def _slugify(name: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or "artifact"
+
+    def _write_artifact(self, artifact: Artifact) -> None:
+        assert self.work_dir is not None
+        stage = self._STAGE_DIRS.get(artifact.artifact_type, "misc")
+        # When a story exists, resolve the TDD test stage so the Test
+        # Writer's acceptance tests land in the acceptance directory.
+        if (
+            artifact.story_id
+            and artifact.artifact_type == ArtifactType.TEST_CODE
+            and artifact.story_id in self.stories
+        ):
+            story_state = self.stories[artifact.story_id].state
+            if story_state == StoryState.ACCEPTANCE:
+                stage = "acceptance"
+        ext = self._EXTENSIONS.get(artifact.artifact_type, self._DEFAULT_EXT)
+        slug = self._slugify(artifact.name)
+        target_dir = self.work_dir / stage
+        target_dir.mkdir(parents=True, exist_ok=True)
+        path = target_dir / f"{slug}{ext}"
+
+        content = artifact.content
+        if isinstance(content, (dict, list)):
+            content = json.dumps(content, indent=2)
+        elif content is None:
+            content = ""
+        else:
+            content = str(content)
+        path.write_text(content, encoding="utf-8")
+        self._files_written += 1
+        print(f"    wrote {path}", file=sys.stderr)
+
+    # ── Story queries ──────────────────────────────────────────────────
 
     def get_artifacts_for_story(self, story_id: str) -> list[Artifact]:
         story = self.get_story(story_id)
@@ -494,6 +584,8 @@ class WorkflowEngine:
             "total_stories": len(self.stories),
             "total_agents": len(self.agents),
             "total_artifacts": len(self.artifacts),
+            "files_written": self._files_written,
+            "work_dir": str(self.work_dir) if self.work_dir else None,
             "stories_by_state": stories_by_state,
             "agent_utilization": {
                 a.name: f"{a.utilization:.0%}" for a in self.agents.values()
