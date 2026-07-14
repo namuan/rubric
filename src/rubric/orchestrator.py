@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -24,6 +25,18 @@ from rubric.models.story import Story, StoryState, Task, TaskPriority
 logger = logging.getLogger(__name__)
 
 TaskExecutor = Callable[[Any, Task, Story], list[Artifact]]
+
+# User-facing labels for each workflow stage.
+_stage_labels: dict[StoryState, str] = {
+    StoryState.INCEPTION: "INCEPTION",
+    StoryState.PLANNING: "PLANNING",
+    StoryState.DESIGN: "DESIGN",
+    StoryState.IMPLEMENTATION: "IMPLEMENT",
+    StoryState.REVIEW: "REVIEW",
+    StoryState.ACCEPTANCE: "ACCEPTANCE",
+    StoryState.INTEGRATION: "INTEGRATION",
+    StoryState.DELIVERY: "DELIVERY",
+}
 
 
 @dataclass(frozen=True)
@@ -108,6 +121,8 @@ def _run_stage(
         if not any(existing_task.id == task.id for existing_task in story.tasks):
             story.tasks.append(task)
 
+    stage_label = _stage_labels.get(target_state, target_state.value.upper())
+
     for task in tasks:
         agent = engine.scheduler.find_best_agent(
             task,
@@ -132,6 +147,8 @@ def _run_stage(
             engine.block_story(story.id, reason)
             return False
 
+        print(f"  {stage_label}: {task.title}  [{agent.name}]", file=sys.stderr)
+
         try:
             engine.scheduler.assign_task(task, agent)
         except Exception as error:
@@ -152,16 +169,20 @@ def _run_stage(
             )
         if artifacts is None:
             reason = f"{target_state.value} task '{task.title}' could not be completed"
+            print(f"  ✗ {stage_label} FAILED: {reason}", file=sys.stderr)
             engine.block_story(story.id, reason)
             return False
 
     if next_state is None:
         return True
-    return engine.transition_story(
+    ok = engine.transition_story(
         story.id,
         next_state,
         f"{target_state.value.capitalize()} stage complete",
     )
+    if ok:
+        print(f"  ✓ {stage_label} complete", file=sys.stderr)
+    return ok
 
 
 def _pipeline_result(engine: WorkflowEngine, story: Story) -> dict[str, Any]:

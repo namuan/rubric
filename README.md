@@ -102,10 +102,24 @@ uv run rubric run "User Authentication" \
   --criteria "Protected routes reject requests without a valid token"
 ```
 
-Output shows:
+Real-time progress prints to stderr as each stage executes:
+
+```
+Config : /Users/nnn/.config/rubric/rubric.json
+LLM    : enabled (7 agents, default: openai)
+
+  INCEPTION: Define acceptance criteria  [Alice PO]
+  ✓ INCEPTION complete
+  PLANNING: Break down into tasks  [Grace Planner]
+  ✓ PLANNING complete
+  ...
+  ✓ DELIVERY complete
+```
+
+The final summary prints to stdout and shows:
 - Final story state (`done`)
-- Task completion (e.g. `11/11`)
-- TDD step completion (e.g. `12/12`)
+- Task completion (e.g. `14/14`)
+- TDD step completion (e.g. `15/15`)
 - All artifacts produced
 
 ### Run from Python
@@ -157,7 +171,7 @@ uv run python examples/basic_story.py
 uv run pytest tests/ -v
 ```
 
-All 60 tests should pass with zero warnings.
+All 83 tests should pass with zero warnings.
 
 ---
 
@@ -168,11 +182,12 @@ rubric/
 ├── pyproject.toml              # Package config
 ├── README.md
 ├── config/
-│   └── llm_config.json         # Example LLM configuration
+│   └── llm_config.json         # Example LLM configuration (project-local)
 ├── src/
 │   └── rubric/
 │       ├── cli.py              # CLI entry point
 │       ├── orchestrator.py     # Wires everything together
+│       ├── settings.py         # Global config loading (~/.config/rubric/rubric.json)
 │       ├── models/
 │       │   ├── story.py        # Story, Task, TaskStep, StoryState
 │       │   ├── agent.py        # Agent, Role definitions
@@ -201,18 +216,22 @@ rubric/
     ├── test_engine.py
     ├── test_agents.py
     ├── test_orchestrator.py
-    └── test_cli.py
+    ├── test_cli.py
+    └── test_settings.py
 ```
 
 ---
 
 ## CLI Reference
 
+### `rubric run` — Run a story
+
 ```bash
 rubric run <title> \
   --description <text> \
   --criteria <text> \
   --output json|text \
+  --config <path> \
   --verbose \
   --state-file <path> \
   --event-log <path>
@@ -224,7 +243,8 @@ rubric run <title> \
 | `--description` | `-d` | Story description |
 | `--criteria` | `-c` | Acceptance criteria (repeatable) |
 | `--output` | `-o` | Output format: `json` or `text` (default: text) |
-| `--verbose` | `-v` | Enable detailed logging |
+| `--config` | | Path to rubric config file (default: `~/.config/rubric/rubric.json`) |
+| `--verbose` | `-v` | Enable detailed per-artifact logging |
 | `--state-file` | | Save and restore workflow state in this JSON file |
 | `--event-log` | | Append workflow events to this JSON-lines file |
 
@@ -232,6 +252,14 @@ Example with JSON output:
 
 ```bash
 uv run rubric run "Feature" --output json | jq .
+```
+
+### `rubric config` — Manage configuration
+
+```bash
+rubric config              # Show current config path and status
+rubric config init         # Generate example config at ~/.config/rubric/rubric.json
+rubric config init -o path # Generate example config at a custom path
 ```
 
 ---
@@ -267,15 +295,34 @@ story = engine.create_story("My Feature", "Description")
 
 ---
 
-## Using real LLMs
+## Configuration
 
-Agents load the provider and model for their role from `config/llm_config.json`. They use deterministic template artifacts by default.
+Rubric loads configuration from (in priority order):
 
-To enable live provider calls, set `global.enabled` to `true` in the configuration or set `RUBRIC_ENABLE_LLM=1`. Set the provider API key environment variable named in the configuration before you run the pipeline.
+1. `RUBRIC_LLM_CONFIG` environment variable (explicit path)
+2. `~/.config/rubric/rubric.json` (global user config)
+3. `config/llm_config.json` in the current directory (project-local)
 
-Set `APP_ENV` or `ENV` to select an environment. Rubric first looks for `llm_config.<environment>.json`. It then applies any matching `environments` override in the base configuration. The included development configuration uses Ollama. Production keeps the configured cloud providers.
+Generate a default config:
+
+```bash
+rubric config init
+```
+
+### Using real LLMs
+
+Agents load the provider and model for their role from the configuration. They use deterministic template artifacts by default.
+
+To enable live provider calls:
+
+1. **Generate and edit your config:** `rubric config init`, then set `global.enabled` to `true` and configure providers and agent models.
+2. **Or use the env var:** Set `RUBRIC_ENABLE_LLM=1` to override the config.
+
+Set the provider API key environment variable named in the configuration (e.g. `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) before you run the pipeline.
 
 Rubric supports OpenAI-compatible APIs, Anthropic and Google providers. You can also inject an `LLMProvider` when you create an agent for custom integrations.
+
+---
 
 ## Save workflow state and events
 

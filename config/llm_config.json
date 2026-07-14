@@ -85,23 +85,6 @@
     }
   },
 
-  "environments": {
-    "development": {
-      "agents": {
-        "product_owner": {"provider": "ollama", "model": "llama3.3-70b"},
-        "architect": {"provider": "ollama", "model": "llama3.3-70b"},
-        "developer": {"provider": "ollama", "model": "llama3.3-70b"},
-        "reviewer": {"provider": "ollama", "model": "llama3.3-70b"},
-        "test_writer": {"provider": "ollama", "model": "llama3.3-70b"},
-        "devops": {"provider": "ollama", "model": "llama3.3-70b"},
-        "scrum_master": {"provider": "ollama", "model": "llama3.3-70b"}
-      }
-    },
-    "production": {
-      "global": {"enabled": false}
-    }
-  },
-
   "global": {
     "enabled": false,
     "temperature": 0.3,

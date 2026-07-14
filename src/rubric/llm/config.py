@@ -6,11 +6,13 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any
 
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
+
+# ── Global rubric config path ──────────────────────────────────────
+_GLOBAL_RUBRIC_CONFIG = Path.home() / ".config" / "rubric" / "rubric.json"
 
 
 class ProviderSettings(BaseModel):
@@ -37,56 +39,48 @@ class GlobalLLMSettings(BaseModel):
 
 
 class LLMConfig(BaseModel):
-    environment: str = "development"
     default_provider: str
     providers: dict[str, ProviderSettings]
     agents: dict[str, AgentLLMSettings]
     global_settings: GlobalLLMSettings = Field(alias="global")
 
 
-def active_environment(environment: str | None = None) -> str:
-    """Resolve the configured runtime environment."""
-    return environment or os.getenv("APP_ENV") or os.getenv("ENV") or "development"
+def default_config_path() -> Path | None:
+    """Find an LLM configuration file.
 
+    Priority order:
 
-def default_config_path(environment: str | None = None) -> Path | None:
-    """Find an environment-specific or repository-local configuration file."""
+    1. ``RUBRIC_LLM_CONFIG`` environment variable
+    2. ``~/.config/rubric/rubric.json`` (global user config)
+    3. ``config/llm_config.json`` in the current working directory
+    4. ``config/llm_config.json`` shipped with the package
+    """
     if configured_path := os.getenv("RUBRIC_LLM_CONFIG"):
         return Path(configured_path)
 
-    resolved_environment = active_environment(environment)
+    if _GLOBAL_RUBRIC_CONFIG.is_file():
+        return _GLOBAL_RUBRIC_CONFIG
+
     config_directories = [
         Path.cwd() / "config",
         Path(__file__).resolve().parents[3] / "config",
     ]
-    candidates = (
-        [
-            directory / f"llm_config.{resolved_environment}.json"
-            for directory in config_directories
-        ]
-        + [
-            directory / f"llm_config_{resolved_environment}.json"
-            for directory in config_directories
-        ]
-        + [directory / "llm_config.json" for directory in config_directories]
-    )
-    return next((path for path in candidates if path.is_file()), None)
+    for directory in config_directories:
+        candidate = directory / "llm_config.json"
+        if candidate.is_file():
+            return candidate
+    return None
 
 
-def load_llm_config(
-    path: str | Path | None = None,
-    environment: str | None = None,
-) -> LLMConfig | None:
-    """Load the selected environment's LLM settings.
+def load_llm_config(path: str | Path | None = None) -> LLMConfig | None:
+    """Load LLM settings from a configuration file.
 
-    Environment overrides in the base JSON file are applied after the shared
-    settings.  A dedicated ``llm_config.<environment>.json`` file takes
-    precedence when present.
+    When *path* is ``None`` the loader looks first at the
+    ``RUBRIC_LLM_CONFIG`` environment variable, then at the local
+    ``config/llm_config.json`` file, and finally at
+    ``~/.config/rubric/rubric.json`` (extracting the ``llm`` key).
     """
-    resolved_environment = active_environment(environment)
-    config_path = (
-        Path(path) if path is not None else default_config_path(resolved_environment)
-    )
+    config_path = Path(path) if path is not None else default_config_path()
     if config_path is None:
         return None
     try:
@@ -99,30 +93,15 @@ def load_llm_config(
             f"Could not load LLM config from {config_path}: {error}"
         ) from error
 
+    # If this is a rubric.json (has a top-level "version" key with the
+    # llm settings nested under "llm"), unwrap the LLM section.
+    if isinstance(raw_config.get("version"), int) and "llm" in raw_config:
+        raw_config = raw_config["llm"]
+
     raw_config = {
         key: value for key, value in raw_config.items() if not key.startswith("//")
     }
-    environment_overrides = raw_config.pop("environments", {})
-    selected_overrides = environment_overrides.get(resolved_environment, {})
-    if not isinstance(selected_overrides, dict):
-        raise ValueError(
-            f"Invalid LLM environment override for {resolved_environment!r}"
-        )
-    raw_config = _merge_settings(raw_config, selected_overrides)
-    raw_config["environment"] = resolved_environment
     try:
         return LLMConfig.model_validate(raw_config)
     except ValueError as error:
         raise ValueError(f"Invalid LLM config in {config_path}: {error}") from error
-
-
-def _merge_settings(base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
-    """Recursively merge an environment override without mutating its inputs."""
-    merged = dict(base)
-    for key, override_value in overrides.items():
-        base_value = merged.get(key)
-        if isinstance(base_value, dict) and isinstance(override_value, dict):
-            merged[key] = _merge_settings(base_value, override_value)
-        else:
-            merged[key] = override_value
-    return merged

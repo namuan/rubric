@@ -135,7 +135,7 @@
 
 ### 18. [x] Environment-Aware Configuration
 - **Source**: Architecture Report §9.3, Judge Report §4.5
-- **Benefit**: Different LLM providers for dev vs prod. `ENV`/`APP_ENV` with environment-specific config loading.
+- **Benefit**: Different LLM providers for dev vs prod. `ENV`/`APP_ENV` with environment-specific config loading. *(Later removed — replaced by `--config` flag and `~/.config/rubric/rubric.json`.)*
 - **Effort**: ~1–2 days
 
 ### 19. [x] Remove or Wire Dead Code

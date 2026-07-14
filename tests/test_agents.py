@@ -23,21 +23,19 @@ class RecordingProvider:
 
 
 class TestAgentExecution:
-    def test_loads_role_based_llm_configuration(self):
-        config = load_llm_config(environment="development")
-        assert config is not None
-        assert config.environment == "development"
-        assert config.agents["developer"].provider == "ollama"
-        assert not config.global_settings.enabled
-
-    def test_production_environment_keeps_cloud_provider_configuration(
-        self, monkeypatch
-    ):
-        monkeypatch.setenv("APP_ENV", "production")
+    def test_loads_base_llm_configuration(self):
         config = load_llm_config()
         assert config is not None
-        assert config.environment == "production"
         assert config.agents["developer"].provider == "anthropic"
+        assert config.agents["product_owner"].provider == "openai"
+        assert not config.global_settings.enabled
+
+    def test_llm_config_has_required_providers(self):
+        config = load_llm_config()
+        assert config is not None
+        assert "openai" in config.providers
+        assert "anthropic" in config.providers
+        assert "ollama" in config.providers
 
     def test_product_owner(self, agent_context):
         engine, story, task = agent_context
